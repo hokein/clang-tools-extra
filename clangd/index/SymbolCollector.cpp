@@ -8,6 +8,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "SymbolCollector.h"
+#include "SymbolYAML.h"
 
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Decl.h"
@@ -94,7 +95,18 @@ bool SymbolCollector::handleDeclOccurence(
   return true;
 }
 
-void SymbolCollector::finish() { Symbols.freeze(); }
+void SymbolCollector::finish() {
+  Symbols.freeze();
+  if (Context) {
+    Context->reportResult(Filename, SymbolToYAML(Symbols));
+  }
+}
+
+void SymbolCollector::initialize(ASTContext &Ctx) {
+  auto FID = Ctx.getSourceManager().getMainFileID();
+  const auto *Entry = Ctx.getSourceManager().getFileEntryForID(FID);
+  Filename = Entry->tryGetRealPathName();
+}
 
 } // namespace clangd
 } // namespace clang

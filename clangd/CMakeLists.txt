@@ -42,4 +42,5 @@ add_clang_library(clangDaemon
 if( LLVM_LIB_FUZZING_ENGINE OR LLVM_USE_SANITIZE_COVERAGE )
   add_subdirectory(fuzzer)
 endif()
+add_subdirectory(index-source-builder)
 add_subdirectory(tool)

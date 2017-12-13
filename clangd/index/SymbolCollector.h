@@ -11,6 +11,7 @@
 
 #include "clang/Index/IndexDataConsumer.h"
 #include "clang/Index/IndexSymbol.h"
+#include "clang/Tooling/Execution.h"
 
 namespace clang {
 namespace clangd {
@@ -23,6 +24,10 @@ namespace clangd {
 class SymbolCollector : public index::IndexDataConsumer {
 public:
   SymbolCollector() = default;
+  SymbolCollector(tooling::ExecutionContext *Context = nullptr)
+      : Context(Context) {}
+
+  void initialize(ASTContext &Ctx) override;
 
   bool
   handleDeclOccurence(const Decl *D, index::SymbolRoleSet Roles,
@@ -35,6 +40,9 @@ public:
   SymbolSlab takeSymbols() { return std::move(Symbols); }
 
 private:
+  tooling::ExecutionContext* Context;
+  std::string Filename;
+
   // All Symbols collected from the AST.
   SymbolSlab Symbols;
 };
