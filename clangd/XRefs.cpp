@@ -51,7 +51,7 @@ public:
                       unsigned Offset,
                       index::IndexDataConsumer::ASTNodeInfo ASTNode) override {
     if (isSearchedLocation(FID, Offset))
-      Decls.push_back(D);
+      Decls.push_back(ASTNode.OrigD);
     return true;
   }
 
