@@ -71,6 +71,10 @@ bool shouldFilterDecl(const NamedDecl *ND, ASTContext *ASTCtx,
   using namespace clang::ast_matchers;
   if (ND->isImplicit())
     return true;
+  // Skip nameless declarations.
+  if (ND->getDeclName().isEmpty())
+    return true;
+
   // FIXME: figure out a way to handle internal linkage symbols (e.g. static
   // variables, function) defined in the .cc files. Also we skip the symbols
   // in anonymous namespace as the qualifier names of these symbols are like
@@ -84,10 +88,13 @@ bool shouldFilterDecl(const NamedDecl *ND, ASTContext *ASTCtx,
 
   // We only want symbols in namespaces or translation unit scopes (e.g. no
   // class members).
-  if (match(decl(allOf(
-                Opts.IndexMainFiles ? decl()
-                                    : decl(unless(isExpansionInMainFile())),
-                hasDeclContext(anyOf(namespaceDecl(), translationUnitDecl())))),
+  auto InTopLevelScope =
+      hasDeclContext(anyOf(namespaceDecl(), translationUnitDecl()));
+  if (match(decl(allOf(Opts.IndexMainFiles
+                           ? decl()
+                           : decl(unless(isExpansionInMainFile())),
+                       anyOf(InTopLevelScope,
+                             hasDeclContext(enumDecl(InTopLevelScope))))),
             *ND, *ASTCtx)
           .empty())
     return true;
