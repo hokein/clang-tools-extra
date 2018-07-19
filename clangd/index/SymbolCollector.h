@@ -14,6 +14,7 @@
 #include "clang/Index/IndexDataConsumer.h"
 #include "clang/Index/IndexSymbol.h"
 #include "clang/Sema/CodeCompleteConsumer.h"
+#include "llvm/Support/StringSaver.h"
 
 namespace clang {
 namespace clangd {
@@ -98,6 +99,38 @@ private:
   // canonical by clang but should not be considered canonical in the index
   // unless it's a definition.
   llvm::DenseMap<const Decl *, const Decl *> CanonicalDecls;
+};
+
+
+class SymbolReferenceCollector : public index::IndexDataConsumer {
+ public:
+   SymbolReferenceCollector(ASTContext *AST, XrefKindSet Options,
+                            bool IndexAll = true,
+                            llvm::DenseSet<SymbolID> IDs = {})
+       : ASTCtx(AST), Options(Options), IndexAll(IndexAll), SelectedIDs(IDs) {}
+
+   // std::vector<Location> getReferences() {
+   // std::vector<Location> Result;
+   // for (auto It : ReferenceLocations) {
+   // Result.insert(Result.end(), It.second.begin(), It.second.end());
+   //}
+   // return Result;
+   //}
+
+   SymbolRefSlab takeSymbols() { return std::move(Ref).build(); }
+
+   bool
+   handleDeclOccurence(const Decl *D, index::SymbolRoleSet Roles,
+                       ArrayRef<index::SymbolRelation> Relations,
+                       SourceLocation Loc,
+                       index::IndexDataConsumer::ASTNodeInfo ASTNode) override;
+ private:
+   ASTContext *ASTCtx;
+   llvm::DenseSet<SymbolID> SelectedIDs;
+   XrefKindSet Options;
+
+   SymbolRefSlab::Builder Ref;
+   bool IndexAll;
 };
 
 } // namespace clangd

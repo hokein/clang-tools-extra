@@ -11,20 +11,50 @@
 #include "../FuzzyMatch.h"
 #include "../Logger.h"
 #include <queue>
+#include <set>
 
 namespace clang {
 namespace clangd {
 
-void MemIndex::build(std::shared_ptr<std::vector<const Symbol *>> Syms) {
+void MemIndex::build(
+    std::shared_ptr<std::vector<const Symbol *>> Syms,
+    std::shared_ptr<std::vector<const SymbolRefLocation *>> SymbolRefs) {
   llvm::DenseMap<SymbolID, const Symbol *> TempIndex;
   for (const Symbol *Sym : *Syms)
     TempIndex[Sym->ID] = Sym;
+  llvm::DenseMap<SymbolIDRef, std::vector<const SymbolRefLocation *>> TempXrefIndex;
+  //llvm::DenseMap<SymbolIDRef, std::string> abc;
+  auto cmp = [](const SymbolRefLocation* L, const SymbolRefLocation* R) {
+    return L->Loc < R->Loc;
+  };
+  std::set<const SymbolRefLocation*, decltype(cmp)> Dep(cmp);
+  //std::set<SymbolRefLocation*, decltype(cmp)> dep(cmp);
 
+  for (const auto *Ref : *SymbolRefs) {
+    //llvm::errs() << Ref->Loc << "\n";
+    auto inserted_value = Dep.insert(Ref);
+    if (Ref->SymID.ID()->str() == "D6F95DC7B26A83A738DE640FF8F58F72245A08CD") {
+      llvm::errs() << Ref->Loc;
+      llvm::errs() << "find \n!";
+    }
+    if (inserted_value.second) {
+    if (Ref->SymID.ID()->str() == "D6F95DC7B26A83A738DE640FF8F58F72245A08CD") {
+      llvm::errs() << Ref->Loc;
+      llvm::errs() << "insert\n!";
+    }
+      TempXrefIndex[Ref->SymID].push_back(Ref);
+    }
+  }
+
+  llvm::errs() << Dep.size() << "!!\n";
   // Swap out the old symbols and index.
   {
     std::lock_guard<std::mutex> Lock(Mutex);
     Index = std::move(TempIndex);
     Symbols = std::move(Syms); // Relase old symbols.
+
+    XrefIndex = std::move(TempXrefIndex);
+    Xrefs = std::move(SymbolRefs);
   }
 }
 
@@ -71,6 +101,19 @@ void MemIndex::lookup(const LookupRequest &Req,
   }
 }
 
+void MemIndex::xrefs(
+    const XrefRequest &Req,
+    llvm::function_ref<void(const SymbolRefLocation &)> Callback) const {
+  for (const auto &ID : Req.IDs) {
+    auto I = XrefIndex.find(&ID);
+    if (I != XrefIndex.end()) {
+      for (auto *Ref : I->second) {
+        Callback(*Ref);
+      }
+    }
+  }
+}
+
 std::unique_ptr<SymbolIndex> MemIndex::build(SymbolSlab Slab) {
   struct Snapshot {
     SymbolSlab Slab;
@@ -83,7 +126,7 @@ std::unique_ptr<SymbolIndex> MemIndex::build(SymbolSlab Slab) {
   auto S = std::shared_ptr<std::vector<const Symbol *>>(std::move(Snap),
                                                         &Snap->Pointers);
   auto MemIdx = llvm::make_unique<MemIndex>();
-  MemIdx->build(std::move(S));
+  //MemIdx->build(std::move(S));
   return std::move(MemIdx);
 }
 

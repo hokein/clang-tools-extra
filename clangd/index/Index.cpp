@@ -134,5 +134,32 @@ SymbolSlab SymbolSlab::Builder::build() && {
   return SymbolSlab(std::move(NewArena), std::move(Symbols));
 }
 
+void SymbolRefSlab::Builder::insert(const SymbolRefLocation &XrefLoc) {
+  // Intern replaces V with a reference to the same string owned by the arena.
+  auto Intern = [&](StringRef &V) {
+    auto R = Strings.insert(V);
+    if (R.second) { // New entry added to the table, copy the string.
+      *R.first = V.copy(Arena);
+    }
+    V = *R.first;
+  };
+
+  RefLocations.push_back(XrefLoc);
+  Intern(RefLocations.back().Loc.FileURI);
+
+  auto R = IDs.insert(RefLocations.back().SymID);
+  if (R.second) {
+    auto *ID = Arena.Allocate<SymbolID>();
+    *ID = *XrefLoc.SymID.ID();
+    *R.first = SymbolIDRef(ID);
+    //*R.first = SymbolIDRef(ID);
+  }
+  RefLocations.back().SymID = *R.first;
+}
+
+SymbolRefSlab SymbolRefSlab::Builder::build() && {
+  return SymbolRefSlab(std::move(Arena), std::move(RefLocations));
+}
+
 } // namespace clangd
 } // namespace clang

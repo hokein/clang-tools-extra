@@ -19,6 +19,7 @@
 #include "llvm/ADT/StringExtras.h"
 #include <array>
 #include <string>
+#include <set>
 
 namespace clang {
 namespace clangd {
@@ -39,6 +40,11 @@ struct SymbolLocation {
   Position Start;
   Position End;
 
+  bool operator<(const SymbolLocation& L) const {
+    return std::tie(Start.Line, Start.Column, End.Line, End.Column, FileURI) <
+           std::tie(L.Start.Line, L.Start.Column, L.End.Line, L.End.Column,
+                    L.FileURI);
+  }
   operator bool() const { return !FileURI.empty(); }
 };
 llvm::raw_ostream &operator<<(llvm::raw_ostream &, const SymbolLocation &);
@@ -95,7 +101,7 @@ void operator>>(llvm::StringRef HexStr, SymbolID &ID);
 } // namespace clangd
 } // namespace clang
 namespace llvm {
-// Support SymbolIDs as DenseMap keys.
+// Support SymbolID as DenseMap keys.
 template <> struct DenseMapInfo<clang::clangd::SymbolID> {
   static inline clang::clangd::SymbolID getEmptyKey() {
     static clang::clangd::SymbolID EmptyKey("EMPTYKEY");
@@ -246,6 +252,24 @@ public:
            Symbols.capacity() * sizeof(Symbol);
   }
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
   // SymbolSlab::Builder is a mutable container that can 'freeze' to SymbolSlab.
   // The frozen SymbolSlab will use less memory.
   class Builder {
@@ -305,6 +329,97 @@ struct LookupRequest {
   llvm::DenseSet<SymbolID> IDs;
 };
 
+enum class XrefKind : uint32_t {
+  Declarataion = 0,
+  Definition = 1,
+  Reference = 2,
+  // Others
+};
+
+using XrefKindSet = uint8_t;
+
+struct XrefRequest {
+  llvm::DenseSet<SymbolID> IDs;
+  int32_t Options;
+};
+
+class SymbolIDRef {
+public:
+  SymbolIDRef() : SymID(nullptr) {}
+  SymbolIDRef(const SymbolID* ID) : SymID(ID) {}
+  bool operator<(SymbolIDRef RHS) const { return *ID() < *RHS.ID(); }
+  const SymbolID *ID() const { return SymID; }
+
+private:
+  friend llvm::hash_code hash_value(const SymbolIDRef &IDRef) {
+    return hash_value(*IDRef.ID());
+  }
+
+  const SymbolID *SymID;
+};
+
+struct SymbolRefLocation {
+  SymbolIDRef SymID;
+  XrefKind Kind;
+  SymbolLocation Loc;
+};
+
+
+// An immutable symbol container that stores a set of symbols.
+// The container will maintain the lifetime of the symbols.
+class SymbolRefSlab {
+public:
+  using const_iterator = std::vector<SymbolRefLocation>::const_iterator;
+  using iterator = const_iterator;
+
+  SymbolRefSlab() = default;
+
+  const_iterator begin() const { return RefLocations.begin(); }
+  const_iterator end() const { return RefLocations.end(); }
+  //const_iterator find(const SymbolID &SymID) const;
+
+  size_t size() const { return RefLocations.size(); }
+  //// Estimates the total memory usage.
+  //size_t bytes() const {
+    //return sizeof(*this) + Arena.getTotalMemory() +
+           //Symbols.capacity() * sizeof(Symbol);
+  //}
+
+  //// SymbolSlab::Builder is a mutable container that can 'freeze' to SymbolSlab.
+  //// The frozen SymbolSlab will use less memory.
+  class Builder {
+  public:
+    // Adds a symbol, overwriting any existing one with the same ID.
+    // This is a deep copy: underlying strings will be owned by the slab.
+    void insert(const SymbolRefLocation &S);
+
+    //// Returns the symbol with an ID, if it exists. Valid until next insert().
+    //const Symbol *find(const SymbolID &ID) {
+      //auto I = SymbolIndex.find(ID);
+      //return I == SymbolIndex.end() ? nullptr : &Symbols[I->second];
+    //}
+
+    // Consumes the builder to finalize the slab.
+    SymbolRefSlab build() &&;
+
+  private:
+    llvm::BumpPtrAllocator Arena;
+    // Intern table for strings. Contents are on the arena.
+    llvm::DenseSet<llvm::StringRef> Strings;
+    llvm::DenseSet<SymbolIDRef> IDs;
+    //std::set<SymbolIDRef> IDs;
+    std::vector<SymbolRefLocation> RefLocations;
+  };
+
+private:
+  SymbolRefSlab(llvm::BumpPtrAllocator Arena, std::vector<SymbolRefLocation> RefLocations)
+      : Arena(std::move(Arena)), RefLocations(std::move(RefLocations)) {}
+
+  llvm::BumpPtrAllocator Arena; // Owns Symbol data that the SymbolRefLocations do not.
+  std::vector<SymbolRefLocation> RefLocations;
+};
+
+
 /// \brief Interface for symbol indexes that can be used for searching or
 /// matching symbols among a set of symbols based on names or unique IDs.
 class SymbolIndex {
@@ -327,10 +442,36 @@ public:
   lookup(const LookupRequest &Req,
          llvm::function_ref<void(const Symbol &)> Callback) const = 0;
 
-  // FIXME: add interfaces for more index use cases:
-  //  - getAllOccurrences(SymbolID);
+
+  virtual void
+  xrefs(const XrefRequest &Req,
+        llvm::function_ref<void(const SymbolRefLocation&)>) const = 0;
 };
 
 } // namespace clangd
 } // namespace clang
+
+namespace llvm {
+// Support SymbolIDXref as DenseMap keys.
+template <> struct DenseMapInfo<clang::clangd::SymbolIDRef> {
+  static inline clang::clangd::SymbolIDRef getEmptyKey() {
+    static clang::clangd::SymbolID EmptyKey("EMPTYKEY");
+    static clang::clangd::SymbolIDRef Key (&EmptyKey);
+    return Key;
+  }
+  static inline clang::clangd::SymbolIDRef getTombstoneKey() {
+    static clang::clangd::SymbolID TombstoneKey("TOMBSTONEKEY");
+    static clang::clangd::SymbolIDRef Key (&TombstoneKey);
+    return Key;
+  }
+  static unsigned getHashValue(const clang::clangd::SymbolIDRef &Sym) {
+    return hash_value(*Sym.ID());
+  }
+  static bool isEqual(const clang::clangd::SymbolIDRef &LHS,
+                      const clang::clangd::SymbolIDRef &RHS) {
+    return *LHS.ID() == *RHS.ID();
+  }
+};
+
+}
 #endif // LLVM_CLANG_TOOLS_EXTRA_CLANGD_INDEX_INDEX_H

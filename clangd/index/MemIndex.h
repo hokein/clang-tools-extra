@@ -22,7 +22,8 @@ class MemIndex : public SymbolIndex {
 public:
   /// \brief (Re-)Build index for `Symbols`. All symbol pointers must remain
   /// accessible as long as `Symbols` is kept alive.
-  void build(std::shared_ptr<std::vector<const Symbol *>> Symbols);
+  void build(std::shared_ptr<std::vector<const Symbol *>> Symbols,
+             std::shared_ptr<std::vector<const SymbolRefLocation *>> SymbolRefs);
 
   /// \brief Build index from a symbol slab.
   static std::unique_ptr<SymbolIndex> build(SymbolSlab Slab);
@@ -31,15 +32,22 @@ public:
   fuzzyFind(const FuzzyFindRequest &Req,
             llvm::function_ref<void(const Symbol &)> Callback) const override;
 
-  virtual void
+  void
   lookup(const LookupRequest &Req,
          llvm::function_ref<void(const Symbol &)> Callback) const override;
+
+  void
+  xrefs(const XrefRequest &Req,
+        llvm::function_ref<void(const SymbolRefLocation&)>) const override;
 
 private:
   std::shared_ptr<std::vector<const Symbol *>> Symbols;
   // Index is a set of symbols that are deduplicated by symbol IDs.
   // FIXME: build smarter index structure.
   llvm::DenseMap<SymbolID, const Symbol *> Index;
+
+  std::shared_ptr<std::vector<const SymbolRefLocation*>> Xrefs;
+  llvm::DenseMap<SymbolIDRef, std::vector<const SymbolRefLocation*>> XrefIndex;
   mutable std::mutex Mutex;
 };
 

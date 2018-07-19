@@ -11,12 +11,16 @@
 #include "Logger.h"
 #include "SourceCode.h"
 #include "URI.h"
+#include "llvm/ADT/STLExtras.h"
 #include "clang/AST/DeclTemplate.h"
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/Index/IndexDataConsumer.h"
 #include "clang/Index/IndexingAction.h"
 #include "clang/Index/USRGeneration.h"
 #include "llvm/Support/Path.h"
+#include "index/SymbolCollector.h"
+#include "llvm/ADT/DenseSet.h"
+
 namespace clang {
 namespace clangd {
 using namespace llvm;
@@ -667,6 +671,124 @@ Optional<Hover> getHover(ParsedAST &AST, Position Pos) {
     return getHoverContents(*DeducedType, AST.getASTContext());
 
   return None;
+}
+
+namespace {
+
+class ReferencesFinder : public index::IndexDataConsumer {
+ public:
+  ParsedAST &AST;
+  std::vector<SymbolID> IDs;
+  llvm::DenseMap<SymbolID, std::vector<Location>> ReferenceLocations;
+  bool includeDeclaration;
+
+  ReferencesFinder(ParsedAST &AST, std::vector<SymbolID> &IDs,
+                   bool includeDeclaration)
+      : AST(AST), IDs(IDs), includeDeclaration(includeDeclaration) {}
+
+  std::vector<Location> getReferences() {
+    std::vector<Location> Result;
+    for (auto It : ReferenceLocations) {
+      Result.insert(Result.end(), It.second.begin(), It.second.end());
+    }
+    return Result;
+  }
+
+  bool
+  handleDeclOccurence(const Decl *D, index::SymbolRoleSet Roles,
+                      ArrayRef<index::SymbolRelation> Relations,
+                      SourceLocation Loc,
+                      index::IndexDataConsumer::ASTNodeInfo ASTNode) override {
+    if (D->isImplicit())
+      return true;
+    bool shouldCollect = true;
+    shouldCollect =
+        (Roles & static_cast<unsigned>(index::SymbolRole::Reference)) ||
+        (includeDeclaration &&
+         (Roles & static_cast<unsigned>(index::SymbolRole::Declaration))) ||
+        (includeDeclaration &&
+         (Roles & static_cast<unsigned>(index::SymbolRole::Definition)));
+    //if (Roles & static_cast<unsigned>(index::SymbolRole::Reference)) {
+    if (shouldCollect) {
+       if (auto ID = getSymbolID(D)) {
+         if (llvm::is_contained(IDs, *ID)) {
+            //llvm::errs() << "Roles :" << Roles << "
+            index::printSymbolRoles(Roles, llvm::errs());
+            llvm::errs() << "----------\n";
+            ASTNode.OrigD->dump();
+            llvm::errs() << "location:\n";
+            Loc.dump(AST.getASTContext().getSourceManager());
+            llvm::errs() << "----------\n";
+            if (auto L = makeLocation(AST, SourceRange(Loc, Loc))) {
+                ReferenceLocations[*ID].push_back(*L);
+            }
+         }
+       }
+    }
+    return true;
+  }
+};
+
+} // namespace
+
+std::vector<Location> references(ParsedAST &AST, Position Pos,
+                                 bool IncludeDeclaration,
+                                 const SymbolIndex *Index) {
+  const SourceManager &SourceMgr = AST.getASTContext().getSourceManager();
+  SourceLocation SourceLocationBeg =
+      getBeginningOfIdentifier(AST, Pos, SourceMgr.getMainFileID());
+  // Identified symbols at a specific position.
+  auto Symbols = getSymbolAtPosition(AST, SourceLocationBeg);
+  // FIXME: support macros.
+  llvm::DenseSet<SymbolID> IDs;
+  for (const auto* D : Symbols.Decls) {
+    if (auto ID = getSymbolID(D)) {
+      llvm::errs() << "ID: " << *ID << "\n";
+      IDs.insert(*ID);
+    }
+  }
+  XrefKindSet Filter = (XrefKindSet)XrefKind::Reference;
+  if (IncludeDeclaration) {
+    Filter |=
+        (XrefKindSet)XrefKind::Declarataion | (XrefKindSet)XrefKind::Definition;
+  }
+  SymbolReferenceCollector Collector(&AST.getASTContext(), Filter, false, IDs);
+  index::IndexingOptions IndexOpts;
+  IndexOpts.SystemSymbolFilter =
+      index::IndexingOptions::SystemSymbolFilterKind::All;
+  IndexOpts.IndexFunctionLocals = true;
+  // Only find references for the current main file.
+  indexTopLevelDecls(AST.getASTContext(), AST.getLocalTopLevelDecls(),
+                     Collector, IndexOpts);
+
+  const FileEntry *FE =
+      SourceMgr.getFileEntryForID(SourceMgr.getMainFileID());
+  std::string HintPath;
+  if (auto Path = getAbsoluteFilePath(FE, SourceMgr))
+    HintPath = *Path;
+  std::vector<Location> Result;
+  llvm::DenseSet<llvm::StringRef> SeenFiles;
+  for (auto It : Collector.takeSymbols()) {
+    SeenFiles.insert(It.Loc.FileURI);
+    if (auto LSPLoc = ToLSPLocation(It.Loc, HintPath)) {
+      Result.push_back(*LSPLoc);
+    }
+  }
+  if (Index) {
+    llvm::errs() << "Query index\n";
+    XrefRequest Req;
+    Req.IDs = std::move(IDs);
+    Req.Options = Filter;
+    Index->xrefs(Req, [&](const SymbolRefLocation& Loc) {
+      if (!llvm::is_contained(SeenFiles, Loc.Loc.FileURI)) {
+        if (auto LSPLoc = ToLSPLocation(Loc.Loc, HintPath)) {
+          Result.push_back(*LSPLoc);
+          llvm::errs() << "index output: " << LSPLoc->uri.uri();
+        }
+      }
+    });
+  }
+  return Result;
 }
 
 } // namespace clangd

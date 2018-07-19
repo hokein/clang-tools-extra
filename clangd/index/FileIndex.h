@@ -41,16 +41,20 @@ class FileSymbols {
 public:
   /// \brief Updates all symbols in a file. If \p Slab is nullptr, symbols for
   /// \p Path will be removed.
-  void update(PathRef Path, std::unique_ptr<SymbolSlab> Slab);
+  void update(PathRef Path, std::unique_ptr<SymbolSlab> Slab,
+              std::unique_ptr<SymbolRefSlab> RefSlab);
 
   // The shared_ptr keeps the symbols alive
   std::shared_ptr<std::vector<const Symbol *>> allSymbols();
 
+  //
+  std::shared_ptr<std::vector<const SymbolRefLocation *>> allSymbolRefs();
 private:
   mutable std::mutex Mutex;
 
   /// \brief Stores the latest snapshots for all active files.
   llvm::StringMap<std::shared_ptr<SymbolSlab>> FileToSlabs;
+  llvm::StringMap<std::shared_ptr<SymbolRefSlab>> FileToRefSlabs;
 };
 
 /// \brief This manages symbls from files and an in-memory index on all symbols.
@@ -72,6 +76,9 @@ public:
 
   void lookup(const LookupRequest &Req,
               llvm::function_ref<void(const Symbol &)> Callback) const override;
+
+  void xrefs(const XrefRequest &Req,
+        llvm::function_ref<void(const SymbolRefLocation&)>) const override;
 
 private:
   FileSymbols FSymbols;

@@ -183,6 +183,30 @@ getIncludeHeader(llvm::StringRef QName, const SourceManager &SM,
   return toURI(SM, Header, Opts);
 }
 
+llvm::Optional<SymbolLocation> getSymbolLocation(
+    SourceLocation Loc, SourceManager &SM, const SymbolCollector::Options &Opts,
+    const clang::LangOptions &LangOpts, std::string &FileURIStorage) {
+  auto U = toURI(SM, SM.getFilename(Loc), Opts);
+  if (!U)
+    return llvm::None;
+  FileURIStorage = std::move(*U);
+  SymbolLocation Result;
+  Result.FileURI = FileURIStorage;
+
+  auto CreatePosition = [&SM](SourceLocation Loc) {
+    auto LSPLoc = sourceLocToPosition(SM, Loc);
+    SymbolLocation::Position Pos;
+    Pos.Line = LSPLoc.line;
+    Pos.Column = LSPLoc.character;
+    return Pos;
+  };
+
+  Result.Start = CreatePosition(Loc);
+  SourceLocation EndLoc = Lexer::getLocForEndOfToken(Loc, 0, SM, LangOpts);
+  Result.End = CreatePosition(EndLoc);
+  return Result;
+}
+
 // Return the symbol location of the given declaration `D`.
 //
 // For symbols defined inside macros:
@@ -226,6 +250,15 @@ bool isPreferredDeclaration(const NamedDecl &ND, index::SymbolRoleSet Roles) {
   return (Roles & static_cast<unsigned>(index::SymbolRole::Definition)) &&
          llvm::isa<TagDecl>(&ND) &&
          match(decl(isExpansionInMainFile()), ND, ND.getASTContext()).empty();
+}
+
+// Get the symbol ID for a declaration, if possible.
+llvm::Optional<SymbolID> getSymbolID(const Decl *D) {
+  llvm::SmallString<128> USR;
+  if (index::generateUSRForDecl(D, USR)) {
+    return None;
+  }
+  return SymbolID(USR);
 }
 
 } // namespace
@@ -429,6 +462,45 @@ void SymbolCollector::addDefinition(const NamedDecl &ND,
                                       Opts, ASTCtx->getLangOpts(), FileURI))
     S.Definition = *DefLoc;
   Symbols.insert(S);
+}
+
+bool SymbolReferenceCollector::handleDeclOccurence(
+    const Decl *D, index::SymbolRoleSet Roles,
+    ArrayRef<index::SymbolRelation> Relations, SourceLocation Loc,
+    index::IndexDataConsumer::ASTNodeInfo ASTNode) {
+  if (D->isImplicit())
+    return true;
+  bool shouldCollect = true;
+  //shouldCollect =
+      //(Roles & static_cast<unsigned>(index::SymbolRole::Reference)) ||
+      //(includeDeclaration &&
+       //(Roles & static_cast<unsigned>(index::SymbolRole::Declaration))) ||
+      //(includeDeclaration &&
+       //(Roles & static_cast<unsigned>(index::SymbolRole::Definition)));
+  if (shouldCollect) {
+     if (auto ID = getSymbolID(D)) {
+       if (IndexAll || llvm::is_contained(SelectedIDs, *ID)) {
+          //llvm::errs() << "Roles :" << Roles << "
+          //index::printSymbolRoles(Roles, llvm::errs());
+          //llvm::errs() << "----------\n";
+          //ASTNode.OrigD->dump();
+          //llvm::errs() << "location:\n";
+          //Loc.dump(ASTCtx->getSourceManager());
+          //llvm::errs() << "----------\n";
+          SymbolCollector::Options Opts;
+          std::string URI;
+          if (auto L = getSymbolLocation(Loc, ASTCtx->getSourceManager(), Opts,
+                                         ASTCtx->getLangOpts(), URI)) {
+            SymbolRefLocation RefLoc;
+            RefLoc.Kind = XrefKind::Reference;
+            RefLoc.Loc = *L;
+            RefLoc.SymID = &(*ID);
+            Ref.insert(RefLoc);
+          }
+       }
+     }
+  }
+  return true;
 }
 
 } // namespace clangd

@@ -821,6 +821,16 @@ struct DocumentHighlight {
 json::Expr toJSON(const DocumentHighlight &DH);
 llvm::raw_ostream &operator<<(llvm::raw_ostream &, const DocumentHighlight &);
 
+struct ReferenceContext {
+  bool includeDeclaration;
+};
+bool fromJSON(const json::Expr &, ReferenceContext &);
+
+struct  ReferenceParams : public TextDocumentPositionParams {
+  ReferenceContext context;
+};
+bool fromJSON(const json::Expr &, ReferenceParams &);
+
 } // namespace clangd
 } // namespace clang
 

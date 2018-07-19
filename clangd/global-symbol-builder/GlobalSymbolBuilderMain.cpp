@@ -127,6 +127,8 @@ public:
 // Combine occurrences of the same symbol across translation units.
 SymbolSlab mergeSymbols(tooling::ToolResults *Results) {
   SymbolSlab::Builder UniqueSymbols;
+
+  
   llvm::BumpPtrAllocator Arena;
   Symbol::Details Scratch;
   Results->forEachResult([&](llvm::StringRef Key, llvm::StringRef Value) {

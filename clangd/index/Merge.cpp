@@ -74,6 +74,25 @@ class MergedIndex : public SymbolIndex {
         Callback(*Sym);
   }
 
+  void xrefs(const XrefRequest &Req,
+             llvm::function_ref<void(const SymbolRefLocation &)> Callback)
+      const override {
+    SymbolRefSlab::Builder DynB;
+    DenseSet<llvm::StringRef> SeenFiles;
+    Dynamic->xrefs(Req, [&](const SymbolRefLocation &Loc) {
+      DynB.insert(Loc);
+      SeenFiles.insert(Loc.Loc.FileURI);
+    });
+    Static->xrefs(Req, [&](const SymbolRefLocation &Loc) {
+      if (!llvm::is_contained(SeenFiles, Loc.Loc.FileURI)) {
+        Callback(Loc);
+      }
+    });
+    for (const auto& Ref : std::move(DynB).build()) {
+      Callback(Ref);
+    }
+  }
+
 private:
   const SymbolIndex *Dynamic, *Static;
 };

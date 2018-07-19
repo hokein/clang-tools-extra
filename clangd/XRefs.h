@@ -33,6 +33,10 @@ std::vector<DocumentHighlight> findDocumentHighlights(ParsedAST &AST,
 /// Get the hover information when hovering at \p Pos.
 llvm::Optional<Hover> getHover(ParsedAST &AST, Position Pos);
 
+std::vector<Location> references(ParsedAST &AST, Position Pos,
+                                 bool includeDeclaration,
+                                 const SymbolIndex *Index = nullptr);
+
 } // namespace clangd
 } // namespace clang
 #endif
