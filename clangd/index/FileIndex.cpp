@@ -48,12 +48,19 @@ SymbolSlab indexAST(ASTContext &AST, std::shared_ptr<Preprocessor> PP,
 FileIndex::FileIndex(std::vector<std::string> URISchemes)
     : URISchemes(std::move(URISchemes)) {}
 
-void FileSymbols::update(PathRef Path, std::unique_ptr<SymbolSlab> Slab) {
+void FileSymbols::update(PathRef Path, std::unique_ptr<SymbolSlab> Slab,
+                         std::unique_ptr<SymbolOccurrenceSlab> OccurrenceSlab) {
   std::lock_guard<std::mutex> Lock(Mutex);
-  if (!Slab)
+  if (!Slab) {
     FileToSlabs.erase(Path);
-  else
+  } else {
     FileToSlabs[Path] = std::move(Slab);
+  }
+  if (!OccurrenceSlab) {
+    FileToOccurrenceSlabs.erase(Path);
+  } else {
+    FileToOccurrenceSlabs[Path] = std::move(OccurrenceSlab);
+  }
 }
 
 std::shared_ptr<std::vector<const Symbol *>> FileSymbols::allSymbols() {
@@ -79,18 +86,36 @@ std::shared_ptr<std::vector<const Symbol *>> FileSymbols::allSymbols() {
   return {std::move(Snap), Pointers};
 }
 
+SymbolOccurrenceSlab FileSymbols::allSymbolOccurrences() {
+  SymbolOccurrenceSlab::Builder Build;
+  {
+    std::lock_guard<std::mutex> Lock(Mutex);
+
+    // FIXME: make it fast. This is a very expensive operation.
+    for (const auto &FileAndOccurrenceSlab : FileToOccurrenceSlabs) {
+      for (auto &Iter : *FileAndOccurrenceSlab.second) {
+        for (auto &Occurrence : Iter.second) {
+          Build.insert(Iter.first, Occurrence);
+        }
+      }
+    }
+  }
+  return std::move(Build).build();
+}
+
 void FileIndex::update(PathRef Path, ASTContext *AST,
                        std::shared_ptr<Preprocessor> PP) {
   if (!AST) {
-    FSymbols.update(Path, nullptr);
+    FSymbols.update(Path, nullptr, nullptr);
   } else {
     assert(PP);
     auto Slab = llvm::make_unique<SymbolSlab>();
     *Slab = indexAST(*AST, PP, URISchemes);
-    FSymbols.update(Path, std::move(Slab));
+    FSymbols.update(Path, std::move(Slab), nullptr);
   }
   auto Symbols = FSymbols.allSymbols();
-  Index.build(std::move(Symbols));
+  Index.build(std::move(Symbols),
+              FSymbols.allSymbolOccurrences());
 }
 
 bool FileIndex::fuzzyFind(
@@ -103,6 +128,12 @@ void FileIndex::lookup(
     const LookupRequest &Req,
     llvm::function_ref<void(const Symbol &)> Callback) const {
   Index.lookup(Req, Callback);
+}
+
+void FileIndex::findOccurrences(
+    const OccurrencesRequest &Req,
+    llvm::function_ref<void(const SymbolOccurrence &)> Callback) const {
+  Index.findOccurrences(Req, Callback);
 }
 
 } // namespace clangd

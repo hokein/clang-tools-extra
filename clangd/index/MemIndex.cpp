@@ -15,16 +15,20 @@
 namespace clang {
 namespace clangd {
 
-void MemIndex::build(std::shared_ptr<std::vector<const Symbol *>> Syms) {
+void MemIndex::build(std::shared_ptr<std::vector<const Symbol *>> Syms,
+                     SymbolOccurrenceSlab OccurrenceSlab) {
   llvm::DenseMap<SymbolID, const Symbol *> TempIndex;
-  for (const Symbol *Sym : *Syms)
-    TempIndex[Sym->ID] = Sym;
+  if (Syms) {
+    for (const Symbol *Sym : *Syms)
+      TempIndex[Sym->ID] = Sym;
+  }
 
   // Swap out the old symbols and index.
   {
     std::lock_guard<std::mutex> Lock(Mutex);
     Index = std::move(TempIndex);
     Symbols = std::move(Syms); // Relase old symbols.
+    Occurrences = std::move(OccurrenceSlab);
   }
 }
 
@@ -71,7 +75,8 @@ void MemIndex::lookup(const LookupRequest &Req,
   }
 }
 
-std::unique_ptr<SymbolIndex> MemIndex::build(SymbolSlab Slab) {
+std::unique_ptr<SymbolIndex>
+MemIndex::build(SymbolSlab Slab, SymbolOccurrenceSlab OccurrenceSlab) {
   struct Snapshot {
     SymbolSlab Slab;
     std::vector<const Symbol *> Pointers;
@@ -83,8 +88,20 @@ std::unique_ptr<SymbolIndex> MemIndex::build(SymbolSlab Slab) {
   auto S = std::shared_ptr<std::vector<const Symbol *>>(std::move(Snap),
                                                         &Snap->Pointers);
   auto MemIdx = llvm::make_unique<MemIndex>();
-  MemIdx->build(std::move(S));
+  MemIdx->build(std::move(S), std::move(OccurrenceSlab));
   return std::move(MemIdx);
+}
+
+void MemIndex::findOccurrences(
+    const OccurrencesRequest &Req,
+    llvm::function_ref<void(const SymbolOccurrence &)> Callback) const {
+  for (const auto &ID : Req.IDs) {
+    for (const auto& Occurrence : Occurrences.find(ID)) {
+      if (static_cast<bool>(Req.Filter & Occurrence.Kind)) {
+       Callback(Occurrence);
+      }
+    }
+  }
 }
 
 } // namespace clangd

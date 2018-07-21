@@ -74,6 +74,25 @@ class MergedIndex : public SymbolIndex {
         Callback(*Sym);
   }
 
+  void findOccurrences(const OccurrencesRequest &Req,
+                       llvm::function_ref<void(const SymbolOccurrence &)>
+                           Callback) const override {
+    DenseSet<llvm::StringRef> SeenFiles;
+    std::vector<SymbolOccurrence> Results;
+    Dynamic->findOccurrences(Req, [&](const SymbolOccurrence &Occurrence) {
+      Results.push_back(Occurrence);
+      SeenFiles.insert(Occurrence.Location.FileURI);
+    });
+    Static->findOccurrences(Req, [&](const SymbolOccurrence &Occurrence) {
+      if (!llvm::is_contained(SeenFiles, Occurrence.Location.FileURI)) {
+        Callback(Occurrence);
+      }
+    });
+    for (const auto& Ref : Results) {
+      Callback(Ref);
+    }
+  }
+
 private:
   const SymbolIndex *Dynamic, *Static;
 };

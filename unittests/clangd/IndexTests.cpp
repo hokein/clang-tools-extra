@@ -34,7 +34,22 @@ Symbol symbol(llvm::StringRef QName) {
   return Sym;
 }
 
+SymbolOccurrence symbolOccurrence(SymbolOccurrenceKind Kind,
+                                  llvm::StringRef FileURI,
+                                  uint32_t Line, uint32_t Column) {
+  SymbolOccurrence Occurrence;
+  Occurrence.Kind = Kind;
+  Occurrence.Location.FileURI = FileURI;
+  Occurrence.Location.Start.Line = Occurrence.Location.End.Line;
+  Occurrence.Location.Start.Column = Column;
+  Occurrence.Location.End.Column = Column;
+  return Occurrence;
+}
+
 MATCHER_P(Named, N, "") { return arg.Name == N; }
+MATCHER_P(Occurrence, L, "") {
+  return arg == L;
+}
 
 TEST(SymbolSlab, FindAndIterate) {
   SymbolSlab::Builder B;
@@ -233,6 +248,53 @@ TEST(MemIndexTest, Lookup) {
   EXPECT_THAT(lookup(I, {SymbolID("ns::nonono"), SymbolID("ns::xyz")}),
               UnorderedElementsAre("ns::xyz"));
   EXPECT_THAT(lookup(I, SymbolID("ns::nonono")), UnorderedElementsAre());
+}
+
+std::vector<SymbolOccurrence> findOccurrences(const SymbolIndex &I,
+                                              OccurrencesRequest Req) {
+  std::vector<SymbolOccurrence> Results;
+  I.findOccurrences(Req, [&](const SymbolOccurrence &Occurrence) {
+    Results.push_back(Occurrence);
+  });
+  return Results;
+}
+
+TEST(MemIndexTest, findOccurrences) {
+  auto FooDecl = symbolOccurrence(SymbolOccurrenceKind::Declaration,
+                              "file:///foo.h", 1, 2);
+  auto FooDef = symbolOccurrence(SymbolOccurrenceKind::Definition,
+                              "file:///foo.cc", 1, 2);
+  auto FooRef = symbolOccurrence(SymbolOccurrenceKind::Reference,
+                              "file:///call_foo.cc", 1, 2);
+  auto BarDecl = symbolOccurrence(SymbolOccurrenceKind::Declaration,
+                                  "file:///bar.h", 1, 2);
+  SymbolOccurrenceSlab::Builder Occurrences;
+  Occurrences.insert(SymbolID("foo"), FooDecl);
+  Occurrences.insert(SymbolID("foo"), FooDef);
+  Occurrences.insert(SymbolID("foo"), FooRef);
+  Occurrences.insert(SymbolID("bar"), BarDecl);
+  //auto Empty = std::make_shared<std::vector<const Symbol*>>();
+  MemIndex I;
+  I.build(nullptr, std::move(Occurrences).build());
+
+  OccurrencesRequest Req;
+  Req.IDs.insert(SymbolID("foo"));
+  Req.Filter = SymbolOccurrenceKind::Declaration;
+  EXPECT_THAT(findOccurrences(I, Req),
+              UnorderedElementsAre(Occurrence(FooDecl)));
+
+  Req.Filter = SymbolOccurrenceKind::Definition;
+  EXPECT_THAT(findOccurrences(I, Req),
+              UnorderedElementsAre(Occurrence(FooDef)));
+
+  Req.Filter = SymbolOccurrenceKind::Declaration |
+               SymbolOccurrenceKind::Definition |
+               SymbolOccurrenceKind::Reference;
+
+  EXPECT_THAT(findOccurrences(I, Req),
+              UnorderedElementsAre(Occurrence(FooDecl),
+                                   Occurrence(FooDef),
+                                   Occurrence(FooRef)));
 }
 
 TEST(MergeIndexTest, Lookup) {

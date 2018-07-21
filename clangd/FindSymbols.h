@@ -20,6 +20,7 @@ namespace clang {
 namespace clangd {
 class ParsedAST;
 class SymbolIndex;
+class ParsedAST;
 
 /// Searches for the symbols matching \p Query. The syntax of \p Query can be
 /// the non-qualified name or fully qualified of a symbol. For example, "vector"

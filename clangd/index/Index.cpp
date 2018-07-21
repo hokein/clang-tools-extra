@@ -134,5 +134,49 @@ SymbolSlab SymbolSlab::Builder::build() && {
   return SymbolSlab(std::move(NewArena), std::move(Symbols));
 }
 
+raw_ostream &operator<<(raw_ostream &OS, SymbolOccurrenceKind K) {
+  if (K == SymbolOccurrenceKind::Unknown)
+    return OS << "unknown";
+  if (K == SymbolOccurrenceKind::Declaration)
+    return OS << "declaration";
+  if (K == SymbolOccurrenceKind::Definition)
+    return OS << "definition";
+  if (K == SymbolOccurrenceKind::Reference)
+    return OS << "reference";
+  return OS;
+}
+llvm::raw_ostream &operator<<(llvm::raw_ostream &OS, const SymbolOccurrence &S) {
+  OS << S.Location << S.Kind;
+  return OS;
+}
+
+void SymbolOccurrenceSlab::Builder::insert(const SymbolID &SymID,
+                                           const SymbolOccurrence &Occurrence) {
+  auto& SymOccurrences = Occurrences[SymID];
+  SymOccurrences.push_back(Occurrence);
+  SymOccurrences.back().Location.FileURI =
+      UniqueStrings.save(Occurrence.Location.FileURI);
+}
+
+// Consumes the builder to finalize the slab.
+SymbolOccurrenceSlab SymbolOccurrenceSlab::Builder::build() && {
+  llvm::errs() << "build\n";
+  for (auto& IDAndOccurrence : Occurrences) {
+    auto &Occurrence = IDAndOccurrence.getSecond();
+    std::sort(Occurrence.begin(), Occurrence.end(),
+              [](const SymbolOccurrence &L, const SymbolOccurrence &R) {
+                return L < R;
+              });
+    Occurrence.erase(
+        std::unique(Occurrence.begin(), Occurrence.end(),
+                    [](const SymbolOccurrence &L, const SymbolOccurrence &R) {
+                      return L == R;
+                    }),
+        Occurrence.end());
+  }
+
+  return SymbolOccurrenceSlab(std::move(Arena), std::move(Occurrences));
+}
+
 } // namespace clangd
 } // namespace clang

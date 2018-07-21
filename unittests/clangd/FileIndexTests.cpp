@@ -32,11 +32,24 @@ Symbol symbol(llvm::StringRef ID) {
   return Sym;
 }
 
+SymbolOccurrence symbolOccurrence(llvm::StringRef FileURI) {
+  SymbolOccurrence Occurrence;
+  Occurrence.Location.FileURI = FileURI;
+  return Occurrence;
+}
+
 std::unique_ptr<SymbolSlab> numSlab(int Begin, int End) {
   SymbolSlab::Builder Slab;
   for (int i = Begin; i <= End; i++)
     Slab.insert(symbol(std::to_string(i)));
   return llvm::make_unique<SymbolSlab>(std::move(Slab).build());
+}
+
+std::unique_ptr<SymbolOccurrenceSlab> numOccurenceSlab(int Begin, int End) {
+  SymbolOccurrenceSlab::Builder Slab;
+  for (int i = Begin; i <= End; i++)
+    Slab.insert(SymbolID(std::to_string(i)), symbolOccurrence(std::to_string(i)));
+  return llvm::make_unique<SymbolOccurrenceSlab>(std::move(Slab).build());
 }
 
 std::vector<std::string>
@@ -45,6 +58,17 @@ getSymbolNames(const std::vector<const Symbol *> &Symbols) {
   for (const Symbol *Sym : Symbols)
     Names.push_back(Sym->Name);
   return Names;
+}
+
+std::vector<std::string>
+getOccurrenceURI(const SymbolOccurrenceSlab& Slab) {
+  std::vector<std::string> URIs;
+  for (auto It: Slab) {
+    for (auto& Sym : It.second) {
+      URIs.push_back(Sym.Location.FileURI);
+    }
+  }
+  return URIs;
 }
 
 TEST(FileSymbolsTest, UpdateAndGet) {
@@ -62,6 +86,22 @@ TEST(FileSymbolsTest, Overlap) {
   FS.update("f2", numSlab(3, 5));
   EXPECT_THAT(getSymbolNames(*FS.allSymbols()),
               UnorderedElementsAre("1", "2", "3", "3", "4", "5"));
+}
+
+TEST(FileSymbolsTest, OccurrenceOverlap) {
+  FileSymbols FS;
+  FS.update("foo.cc", nullptr, numOccurenceSlab(1, 3));
+  FS.update("foo2.cc", nullptr, numOccurenceSlab(3, 5));
+  EXPECT_THAT(getOccurrenceURI(FS.allSymbolOccurrences()),
+              UnorderedElementsAre("1", "2", "3", "4", "5"));
+}
+
+TEST(FileSymbolsTest, Occurrenceremove) {
+  FileSymbols FS;
+  FS.update("foo.cc", nullptr, numOccurenceSlab(1, 3));
+  FS.update("foo.cc", nullptr, nullptr);
+  EXPECT_THAT(getOccurrenceURI(FS.allSymbolOccurrences()),
+              UnorderedElementsAre());
 }
 
 TEST(FileSymbolsTest, SnapshotAliveAfterRemove) {

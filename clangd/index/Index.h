@@ -17,6 +17,8 @@
 #include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/Optional.h"
 #include "llvm/ADT/StringExtras.h"
+#include "llvm/Support/Allocator.h"
+#include "llvm/Support/StringSaver.h"
 #include <array>
 #include <string>
 
@@ -33,6 +35,9 @@ struct SymbolLocation {
     bool operator==(const Position& P) const {
       return Line == P.Line && Column == P.Column;
     }
+    bool operator<(const Position& P) const {
+      return std::tie(Line, Column) < std::tie(P.Line, P.Column);
+    }
   };
 
   // The URI of the source file where a symbol occurs.
@@ -44,7 +49,11 @@ struct SymbolLocation {
 
   explicit operator bool() const { return !FileURI.empty(); }
   bool operator==(const SymbolLocation& Loc) const {
-    return std::tie(FileURI, Start, End) ==
+    return (std::tie(FileURI, Start, End) ==
+                     std::tie(Loc.FileURI, Loc.Start, Loc.End));
+  }
+  bool operator<(const SymbolLocation& Loc) const {
+    return std::tie(FileURI, Start, End) <
            std::tie(Loc.FileURI, Loc.Start, Loc.End);
   }
 };
@@ -222,7 +231,6 @@ struct Symbol {
   // Optional details of the symbol.
   const Details *Detail = nullptr;
 
-  // FIXME: add all occurrences support.
   // FIXME: add extra fields for index scoring signals.
 };
 llvm::raw_ostream &operator<<(llvm::raw_ostream &OS, const Symbol &S);
@@ -287,6 +295,105 @@ private:
   std::vector<Symbol> Symbols;  // Sorted by SymbolID to allow lookup.
 };
 
+// Describes the kind of a symbol occurrence.
+//
+// This is a bitfield which can be combined from different kinds.
+enum class SymbolOccurrenceKind : uint8_t {
+  Unknown = 0,
+  Declaration = static_cast<uint8_t>(index::SymbolRole::Declaration),
+  Definition = static_cast<uint8_t>(index::SymbolRole::Definition),
+  Reference = static_cast<uint8_t>(index::SymbolRole::Reference),
+};
+inline SymbolOccurrenceKind operator|(SymbolOccurrenceKind L,
+                                      SymbolOccurrenceKind R) {
+  return static_cast<SymbolOccurrenceKind>(static_cast<uint8_t>(L) |
+                                           static_cast<uint8_t>(R));
+}
+inline SymbolOccurrenceKind &operator|=(SymbolOccurrenceKind &L,
+                                        SymbolOccurrenceKind R) {
+  return L = L | R;
+}
+inline SymbolOccurrenceKind operator&(SymbolOccurrenceKind A,
+                                      SymbolOccurrenceKind B) {
+  return static_cast<SymbolOccurrenceKind>(static_cast<uint8_t>(A) &
+                                           static_cast<uint8_t>(B));
+}
+raw_ostream &operator<<(raw_ostream &, SymbolOccurrenceKind);
+
+// Represents a symbol occurrence in the source file. It could be a
+// declaration/definition/reference occurrence.
+struct SymbolOccurrence {
+  // The location of the occurrence.
+  // WARNING: Location does not own the underlying data - FileURI are owned by a
+  // SymbolOccurrenceSlab. Copies are shallow.
+  SymbolLocation Location;
+  SymbolOccurrenceKind Kind = SymbolOccurrenceKind::Unknown;
+};
+inline bool operator==(const SymbolOccurrence &L, const SymbolOccurrence &R) {
+  return std::tie(L.Location, L.Kind) == std::tie(R.Location, R.Kind);
+}
+inline bool operator<(const SymbolOccurrence &L, const SymbolOccurrence &R) {
+  return std::tie(L.Location, L.Kind) < std::tie(R.Location, R.Kind);
+}
+
+llvm::raw_ostream &operator<<(llvm::raw_ostream &OS, const SymbolOccurrence &S);
+
+// An efficient structure of storing large set of symbol occurrences in memory.
+// Filenames are deduplicated.
+class SymbolOccurrenceSlab {
+ public:
+  using const_iterator = llvm::DenseMap<SymbolID, std::vector<SymbolOccurrence>>::const_iterator;
+  using iterator = const_iterator;
+
+  SymbolOccurrenceSlab() = default;
+
+  SymbolOccurrenceSlab(SymbolOccurrenceSlab &&Old)
+      : Arena(std::move(Old.Arena)), Occurrences(std::move(Old.Occurrences)) {}
+  SymbolOccurrenceSlab &operator=(SymbolOccurrenceSlab &&Old) {
+    Arena = std::move(Old.Arena);
+    Occurrences = std::move(Old.Occurrences);
+    return *this;
+  }
+
+  const_iterator begin() const { return Occurrences.begin(); }
+  const_iterator end() const { return Occurrences.end(); }
+
+  llvm::ArrayRef<SymbolOccurrence> find(const SymbolID& ID) const {
+    auto It = Occurrences.find(ID);
+    if (It == Occurrences.end())
+      return {};
+    return It->second;
+  }
+
+  // A mutable container that can 'freeze' to SymbolOccurrenceSlab.
+  // The frozen OccurrenceSlab will use less memory.
+  class Builder {
+  public:
+    Builder() : UniqueStrings(Arena) {}
+    // Adds a symbol occurrence.
+    // This is a deep copy: underlying FileURI will be owned by the slab.
+    void insert(const SymbolID &SymID, const SymbolOccurrence &Occurrence);
+
+    // Consumes the builder to finalize the slab.
+    SymbolOccurrenceSlab build() &&;
+
+  private:
+    llvm::BumpPtrAllocator Arena;
+    llvm::UniqueStringSaver UniqueStrings;
+
+    llvm::DenseMap<SymbolID, std::vector<SymbolOccurrence>> Occurrences;
+  };
+
+private:
+  SymbolOccurrenceSlab(
+      llvm::BumpPtrAllocator Arena,
+      llvm::DenseMap<SymbolID, std::vector<SymbolOccurrence>> Occurrences)
+      : Arena(std::move(Arena)), Occurrences(std::move(Occurrences)) {}
+
+  llvm::BumpPtrAllocator Arena;
+  llvm::DenseMap<SymbolID, std::vector<SymbolOccurrence>> Occurrences;
+};
+
 struct FuzzyFindRequest {
   /// \brief A query string for the fuzzy find. This is matched against symbols'
   /// un-qualified identifiers and should not contain qualifiers like "::".
@@ -312,6 +419,11 @@ struct LookupRequest {
   llvm::DenseSet<SymbolID> IDs;
 };
 
+struct OccurrencesRequest {
+  llvm::DenseSet<SymbolID> IDs;
+  SymbolOccurrenceKind Filter;
+};
+
 /// \brief Interface for symbol indexes that can be used for searching or
 /// matching symbols among a set of symbols based on names or unique IDs.
 class SymbolIndex {
@@ -334,8 +446,14 @@ public:
   lookup(const LookupRequest &Req,
          llvm::function_ref<void(const Symbol &)> Callback) const = 0;
 
-  // FIXME: add interfaces for more index use cases:
-  //  - getAllOccurrences(SymbolID);
+  /// CrossReference finds all symbol occurrences (e.g. references,
+  /// declarations, definitions) and applies \p Callback on each result.
+  ///
+  /// The API is not responsible to rank results.
+  /// The returned result must be deep-copied if it's used outside Callback.
+  virtual void findOccurrences(
+      const OccurrencesRequest &Req,
+      llvm::function_ref<void(const SymbolOccurrence &)> Callback) const = 0;
 };
 
 } // namespace clangd
