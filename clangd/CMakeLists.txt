@@ -41,6 +41,7 @@ add_clang_library(clangDaemon
   index/MemIndex.cpp
   index/Merge.cpp
   index/SymbolCollector.cpp
+  index/SymbolOccurrenceCollector.cpp
   index/SymbolYAML.cpp
 
   index/dex/Iterator.cpp

@@ -27,6 +27,7 @@ add_extra_unittest(ClangdTests
   QualityTests.cpp
   SourceCodeTests.cpp
   SymbolCollectorTests.cpp
+  OccurrenceCollectorTests.cpp
   SyncAPI.cpp
   TUSchedulerTests.cpp
   TestFS.cpp
