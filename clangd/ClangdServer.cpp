@@ -469,6 +469,20 @@ ClangdServer::getUsedBytesPerFile() const {
   return WorkScheduler.getUsedBytesPerFile();
 }
 
+void ClangdServer::references(PathRef File, Position Pos,
+                              bool includeDeclaration,
+                              Callback<std::vector<Location>> CB) {
+  auto Action = [Pos, includeDeclaration,
+                 this](Callback<std::vector<Location>> CB,
+                       llvm::Expected<InputsAndAST> InpAST) {
+    if (!InpAST)
+      return CB(InpAST.takeError());
+    CB(clangd::references(InpAST->AST, Pos, includeDeclaration, Index));
+  };
+
+  WorkScheduler.runWithAST("References", File, Bind(Action, std::move(CB)));
+}
+
 LLVM_NODISCARD bool
 ClangdServer::blockUntilIdleForTest(llvm::Optional<double> TimeoutSeconds) {
   return WorkScheduler.blockUntilIdle(timeoutSeconds(TimeoutSeconds));

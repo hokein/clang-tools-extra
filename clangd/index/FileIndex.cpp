@@ -11,9 +11,38 @@
 #include "SymbolCollector.h"
 #include "clang/Index/IndexingAction.h"
 #include "clang/Lex/Preprocessor.h"
+#include "index/SymbolOccurrenceCollector.h"
 
 namespace clang {
 namespace clangd {
+
+SymbolOccurrenceSlab indexASTOccurrence(ASTContext &AST,
+                                 std::shared_ptr<Preprocessor> PP,
+                                 llvm::ArrayRef<std::string> URISchemes) {
+
+  llvm::errs() << "Index ast ref\n";
+  SymbolOccurrenceKind Filter = SymbolOccurrenceKind::Declaration |
+                                SymbolOccurrenceKind::Definition |
+                                SymbolOccurrenceKind::Reference;
+  SymbolOccurrenceCollector Collector(Filter);
+
+  index::IndexingOptions IndexOpts;
+  IndexOpts.SystemSymbolFilter =
+      index::IndexingOptions::SystemSymbolFilterKind::All;
+  IndexOpts.IndexFunctionLocals = true;
+  std::vector<Decl *> decls = {AST.getTranslationUnitDecl()->decls().begin(),
+                               AST.getTranslationUnitDecl()->decls().end()};
+   for (const auto* D : decls) {
+   llvm::errs() << "local top level Decls\n";
+   D->dump();
+  }
+  indexTopLevelDecls(AST, decls, Collector, IndexOpts);
+  return Collector.takeOccurrences();
+  // for (const auto S : R) {
+  // llvm::errs() << S.Loc << "\n";
+  //}
+  //return R;
+}
 
 SymbolSlab indexAST(ASTContext &AST, std::shared_ptr<Preprocessor> PP,
                     llvm::ArrayRef<std::string> URISchemes) {
@@ -93,6 +122,7 @@ SymbolOccurrenceSlab FileSymbols::allSymbolOccurrences() {
 
     // FIXME: make it fast. This is a very expensive operation.
     for (const auto &FileAndOccurrenceSlab : FileToOccurrenceSlabs) {
+      llvm::errs() << "File name: " << FileAndOccurrenceSlab.first() << "\n";
       for (auto &Iter : *FileAndOccurrenceSlab.second) {
         for (auto &Occurrence : Iter.second) {
           Build.insert(Iter.first, Occurrence);
@@ -100,7 +130,14 @@ SymbolOccurrenceSlab FileSymbols::allSymbolOccurrences() {
       }
     }
   }
-  return std::move(Build).build();
+  //auto s = std::Mo
+  auto S = std::move(Build).build();
+  for (auto& Iter : S) {
+    for (const auto& loc : Iter.second) {
+      llvm::errs() << loc << "~\n";
+    }
+  }
+  return S;
 }
 
 void FileIndex::update(PathRef Path, ASTContext *AST,
@@ -111,7 +148,9 @@ void FileIndex::update(PathRef Path, ASTContext *AST,
     assert(PP);
     auto Slab = llvm::make_unique<SymbolSlab>();
     *Slab = indexAST(*AST, PP, URISchemes);
-    FSymbols.update(Path, std::move(Slab), nullptr);
+    auto OccurrenceSlab = llvm::make_unique<SymbolOccurrenceSlab>();
+    *OccurrenceSlab = indexASTOccurrence(*AST, PP, URISchemes);
+    FSymbols.update(Path, std::move(Slab), std::move(OccurrenceSlab));
   }
   auto Symbols = FSymbols.allSymbols();
   Index.build(std::move(Symbols),

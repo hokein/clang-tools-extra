@@ -597,5 +597,16 @@ bool fromJSON(const json::Value &Params,
   return O && O.map("compilationDatabasePath", CCPC.compilationDatabasePath);
 }
 
+bool fromJSON(const json::Value &Params, ReferenceContext &RC) {
+  json::ObjectMapper O(Params);
+  return O && O.map("includeDeclaration", RC.includeDeclaration);
+}
+
+bool fromJSON(const json::Value &Params, ReferenceParams &R) {
+  json::ObjectMapper O(Params);
+  return O && O.map("context", R.context) &&
+         O.map("textDocument", R.textDocument) && O.map("position", R.position);
+}
+
 } // namespace clangd
 } // namespace clang

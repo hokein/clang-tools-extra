@@ -18,6 +18,7 @@ llvm::Optional<SymbolLocation>
 getTokenLocation(SourceLocation TokLoc, const ASTContext* ASTCtx,
                  std::string &FileURIStorage) {
   const auto& SM = ASTCtx->getSourceManager();
+  TokLoc = SM.getSpellingLoc(TokLoc);
   auto TokenLength = clang::Lexer::MeasureTokenLength(TokLoc, SM,
                                                       ASTCtx->getLangOpts());
 
@@ -68,7 +69,10 @@ bool SymbolOccurrenceCollector::handleDeclOccurence(
   std::string FileURI;
 
   auto AddOccurrence = [&](SourceLocation L, const SymbolID& ID) {
-    if (auto Location = getTokenLocation(Loc, ASTCtx, FileURI)) {
+    if (auto Location = getTokenLocation(L, ASTCtx, FileURI)) {
+      llvm::errs() << "dump occure declaration!\n";
+      D->dump();
+      llvm::errs() << "------------------------\n";
       SymbolOccurrence Occurrence;
       Occurrence.Location = *Location;
       Occurrence.Kind = ToOccurrenceKind(Roles);

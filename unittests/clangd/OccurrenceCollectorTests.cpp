@@ -28,17 +28,22 @@ using testing::Not;
 using testing::UnorderedElementsAre;
 using testing::UnorderedElementsAreArray;
 
-MATCHER_P(OccurrenceRange, Pos, "") {
-  return std::tie(arg.Location.Start.Line,
-                  arg.Location.Start.Column,
-                  arg.Location.End.Line,
-                  arg.Location.End.Column) ==
-         std::tie(Pos.start.line, Pos.start.character, Pos.end.line,
-                  Pos.end.character);
+MATCHER(MyMatcher, "") {
+  const clang::clangd::SymbolOccurrence& Pos = testing::get<0>(arg);
+  const clang::clangd::Range& Range = testing::get<1>(arg);
+
+  return std::tie(Pos.Location.Start.Line,
+                  Pos.Location.Start.Column,
+                  Pos.Location.End.Line,
+                  Pos.Location.End.Column) ==
+         std::tie(Range.start.line, Range.start.character, Range.end.line,
+                  Range.end.character);
 }
+
 namespace clang {
 namespace clangd {
 namespace {
+
 
 class SymbolIndexActionFactory : public tooling::FrontendActionFactory {
 public:
@@ -107,18 +112,63 @@ protected:
   SymbolOccurrenceSlab Occurrences;
 };
 
+//std::vector<testing::Matcher<SymbolOccurrence>>
+//OccurrencesFromTest(const Annotations& Test, llvm::StringRef RefName) {
+  //std::vector<testing::Matcher<SymbolOccurrence>> Expected;
+
+  //for (const auto  &Range: Test.ranges(RefName)) {
+    ////Expected.push_back(Range);
+    //Expected.push_back(MatchesRange(Range));
+  //}
+  //return Expected;
+//}
+
+
+
+//testing::Matcher<const std::vector<SymbolOccurrence>&>
+//OccurrencesFromTest(const Annotations& Test, llvm::StringRef RefName) {
+  //std::vector<SymbolOccurrence> Expected;
+
+  //for (const auto  &Range: Test.ranges(RefName)) {
+    ////Expected.push_back(Range);
+  //}
+  //return UnorderedElementsAreArray(Expected);
+//}
+
+//std::vector<Range>
+//OccurenceRangesFromTest(const Annotations& Test, llvm::StringRef RefName) {
+  //std::vector<Range> Expected;
+  //for (const auto  &Range: Test.ranges(RefName)) {
+    ////Expected.push_back(Range);
+    //Expected.push_back(MatchesRange(Range));
+  //}
+  //return Expected;
+//}
+std::vector<Range> operator+(const std::vector<Range>& L, const std::vector<Range>& R) {
+  std::vector<Range> Result = L;
+  Result.insert(Result.end(), R.begin(), R.end());
+  return Result;
+}
+
 TEST_F(OccurrenceCollectorTest, Reference) {
   Annotations Header(R"(
-  class $ref1[[Foo]] {
+  class $ref[[Foo]] {
   public:
-    $ref2[[Foo]]() {}
-    $ref3[[Foo]](int);
+    $ref[[Foo]]() {}
+    $ref[[Foo]](int);
   };
-  void f();
+
+  class $bar[[Bar]];
+
   )");
   Annotations Main(R"(
+  class $bar[[Bar]] {};
+
+  void f();
   void fff() {
-    $ref4[[Foo]] foo;
+    $ref[[Foo]] foo;
+
+    $bar[[Bar]] bar;
     f();
   }
   )");
@@ -126,13 +176,15 @@ TEST_F(OccurrenceCollectorTest, Reference) {
   auto H = TestTU::withHeaderCode(Header.code());
   auto Symbols = H.headerSymbols();
   auto Foo = findSymbol(Symbols, "Foo");
-  EXPECT_FALSE(Occurrences.find(Foo.ID).empty());
+  auto Bar = findSymbol(Symbols, "Bar");
+
   EXPECT_THAT(Occurrences.find(Foo.ID),
-              UnorderedElementsAre(OccurrenceRange(Header.range("ref1")),
-                                   OccurrenceRange(Header.range("ref2")),
-                                   OccurrenceRange(Header.range("ref3")),
-                                   OccurrenceRange(Main.range("ref4"))
-                                   ));
+              testing::UnorderedPointwise(MyMatcher(), Header.ranges("ref") +
+                                                           Main.ranges("ref")));
+
+  EXPECT_THAT(Occurrences.find(Bar.ID),
+              testing::UnorderedPointwise(MyMatcher(), Header.ranges("bar") +
+                                                           Main.ranges("bar")));
 }
 
 

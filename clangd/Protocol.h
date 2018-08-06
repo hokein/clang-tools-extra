@@ -828,6 +828,15 @@ struct DocumentHighlight {
 llvm::json::Value toJSON(const DocumentHighlight &DH);
 llvm::raw_ostream &operator<<(llvm::raw_ostream &, const DocumentHighlight &);
 
+struct ReferenceContext {
+  bool includeDeclaration;
+};
+bool fromJSON(const llvm::json::Value &, ReferenceContext &);
+struct ReferenceParams : public TextDocumentPositionParams {
+  ReferenceContext context;
+};
+bool fromJSON(const llvm::json::Value &, ReferenceParams &);
+
 } // namespace clangd
 } // namespace clang
 

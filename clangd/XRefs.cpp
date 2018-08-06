@@ -16,7 +16,10 @@
 #include "clang/Index/IndexDataConsumer.h"
 #include "clang/Index/IndexingAction.h"
 #include "clang/Index/USRGeneration.h"
+#include "clang/ASTMatchers/ASTMatchers.h"
+#include "clang/ASTMatchers/ASTMatchFinder.h"
 #include "llvm/Support/Path.h"
+#include "index/SymbolOccurrenceCollector.h"
 namespace clang {
 namespace clangd {
 using namespace llvm;
@@ -73,7 +76,7 @@ class DeclarationAndMacrosFinder : public index::IndexDataConsumer {
   std::vector<const Decl *> Decls;
   std::vector<MacroDecl> MacroInfos;
   const SourceLocation &SearchedLocation;
-  const ASTContext &AST;
+  ASTContext &AST;
   Preprocessor &PP;
 
 public:
@@ -111,7 +114,18 @@ public:
                       ArrayRef<index::SymbolRelation> Relations,
                       SourceLocation Loc,
                       index::IndexDataConsumer::ASTNodeInfo ASTNode) override {
+    using namespace clang::ast_matchers;
     if (Loc == SearchedLocation) {
+      //if (ASTNode.OrigE->getStmtClass() == Stmt::ImplicitCastExprClass)
+        //return true;
+      //ASTNode.OrigE->dump();
+      //llvm::errs() << "\n----\n";
+     if (ASTNode.OrigE && !match(expr(hasDescendant(implicitCastExpr())),
+            *ASTNode.OrigE, AST).empty()) {
+       return true;
+     }
+      //ASTNode.OrigE->IgnoreImplicit()->dump();
+      //llvm::errs() << "\n!!!!\n";
       // Find and add definition declarations (for GoToDefinition).
       // We don't use parameter `D`, as Parameter `D` is the canonical
       // declaration, which is the first declaration of a redeclarable
@@ -667,6 +681,71 @@ Optional<Hover> getHover(ParsedAST &AST, Position Pos) {
     return getHoverContents(*DeducedType, AST.getASTContext());
 
   return None;
+}
+
+std::vector<Location> references(ParsedAST &AST, Position Pos,
+                                 bool IncludeDeclaration,
+                                 const SymbolIndex *Index) {
+  const SourceManager &SourceMgr = AST.getASTContext().getSourceManager();
+  SourceLocation SourceLocationBeg =
+      getBeginningOfIdentifier(AST, Pos, SourceMgr.getMainFileID());
+  // Identified symbols at a specific position.
+  auto Symbols = getSymbolAtPosition(AST, SourceLocationBeg);
+  // FIXME: support macros.
+  llvm::DenseSet<SymbolID> IDs;
+  for (const auto* D : Symbols.Decls) {
+    if (auto ID = getSymbolID(D)) {
+      D->dump();
+      llvm::errs() << "\nID: " << *ID << "\n";
+      IDs.insert(*ID);
+    }
+  }
+  SymbolOccurrenceKind Filter = SymbolOccurrenceKind::Reference;
+  if (IncludeDeclaration) {
+    Filter |=
+        SymbolOccurrenceKind::Declaration | SymbolOccurrenceKind::Definition;
+  }
+  SymbolOccurrenceCollector Collector(Filter, IDs);
+  index::IndexingOptions IndexOpts;
+  IndexOpts.SystemSymbolFilter =
+      index::IndexingOptions::SystemSymbolFilterKind::All;
+  IndexOpts.IndexFunctionLocals = true;
+  // Only find references for the current main file.
+  indexTopLevelDecls(AST.getASTContext(), AST.getLocalTopLevelDecls(),
+                     Collector, IndexOpts);
+
+  const FileEntry *FE =
+      SourceMgr.getFileEntryForID(SourceMgr.getMainFileID());
+  std::string HintPath;
+  if (auto Path = getAbsoluteFilePath(FE, SourceMgr))
+    HintPath = *Path;
+  std::vector<Location> Result;
+  llvm::DenseSet<llvm::StringRef> SeenFiles;
+  auto AllOccurrences = Collector.takeOccurrences();
+  for (const auto& IDAndOccurrences : AllOccurrences) {
+    for (const auto& Occ : IDAndOccurrences.getSecond()) {
+      SeenFiles.insert(Occ.Location.FileURI);
+      if (auto LSPLoc = toLSPLocation(Occ.Location, HintPath)) {
+        Result.push_back(*LSPLoc);
+      }
+    }
+  }
+  if (Index) {
+    llvm::errs() << "Query index\n";
+    OccurrencesRequest Req;
+    Req.IDs = std::move(IDs);
+    Req.Filter = Filter;
+    Index->findOccurrences(Req, [&](const SymbolOccurrence& Occ) {
+      llvm::errs() << "index find occurrence: " << Occ << "\n";
+      if (!llvm::is_contained(SeenFiles, Occ.Location.FileURI)) {
+        if (auto LSPLoc = toLSPLocation(Occ.Location, HintPath)) {
+          Result.push_back(*LSPLoc);
+          llvm::errs() << "index output: " << LSPLoc->uri.uri();
+        }
+      }
+    });
+  }
+  return Result;
 }
 
 } // namespace clangd

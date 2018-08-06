@@ -172,6 +172,10 @@ public:
   void rename(PathRef File, Position Pos, llvm::StringRef NewName,
               Callback<std::vector<tooling::Replacement>> CB);
 
+  /// Retrieve locations for symbol references.
+  void references(PathRef File, Position Pos, bool includeDeclaration,
+                  Callback<std::vector<Location>> CB);
+
   /// Only for testing purposes.
   /// Waits until all requests to worker thread are finished and dumps AST for
   /// \p File. \p File must be in the list of added documents.
