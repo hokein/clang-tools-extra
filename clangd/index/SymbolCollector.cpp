@@ -174,8 +174,9 @@ getIncludeHeader(llvm::StringRef QName, const SourceManager &SM,
   if (Headers.empty())
     return llvm::None;
   llvm::StringRef Header = Headers[0];
-  if (Opts.Includes) {
-    Header = Opts.Includes->mapHeader(Headers, QName);
+  assert(Opts.SymOpts && "SymbolOptions must be set.");
+  if (Opts.SymOpts->Includes) {
+    Header = Opts.SymOpts->Includes->mapHeader(Headers, QName);
     if (Header.startswith("<") || Header.startswith("\""))
       return Header.str();
   }
@@ -224,20 +225,144 @@ bool isPreferredDeclaration(const NamedDecl &ND, index::SymbolRoleSet Roles) {
          match(decl(isExpansionInMainFile()), ND, ND.getASTContext()).empty();
 }
 
+SymbolOccurrenceKind ToOccurrenceKind(index::SymbolRoleSet Roles) {
+  SymbolOccurrenceKind Kind;
+  for (auto Mask :
+       {SymbolOccurrenceKind::Declaration, SymbolOccurrenceKind::Definition,
+        SymbolOccurrenceKind::Reference}) {
+    if (Roles & static_cast<unsigned>(Mask))
+      Kind |= Mask;
+  }
+  return Kind;
+}
+
 } // namespace
 
-SymbolCollector::SymbolCollector(Options Opts) : Opts(std::move(Opts)) {}
+class SymbolCollector::CollectOccurrence {
+public:
+  CollectOccurrence(const SymbolCollector::Options &CollectorOpts,
+                    SymbolSlab::Builder *Builder)
+      : Opts(CollectorOpts), Builder(Builder) {
+    assert(Opts.OccurrenceOpts && "Occurrence options must be set.");
+  }
+
+  void initialize(ASTContext &Ctx) { ASTCtx = &Ctx; }
+
+  void collectDecl(const Decl *D, index::SymbolRoleSet Roles,
+                   ArrayRef<index::SymbolRelation> Relations,
+                   SourceLocation Loc,
+                   index::IndexDataConsumer::ASTNodeInfo ASTNode) {
+    assert(ASTCtx && "ASTContext must be set.");
+    if (D->isImplicit())
+      return;
+
+    // We only collect symbol occurrences in current main file.
+    if (!ASTCtx->getSourceManager().isInMainFile(Loc))
+      return;
+    std::string FileURI;
+    auto AddOccurrence = [&](SourceLocation L, const SymbolID &ID) {
+      if (auto Location =
+              getTokenLocation(Loc, ASTCtx->getSourceManager(), Opts,
+                               ASTCtx->getLangOpts(), FileURI)) {
+        SymbolOccurrence Occurrence;
+        Occurrence.Location = *Location;
+        Occurrence.Kind = ToOccurrenceKind(Roles);
+        Builder->insert(ID, Occurrence);
+      }
+    };
+    if (!(static_cast<unsigned>(Opts.OccurrenceOpts->Filter) & Roles))
+      return;
+
+    if (auto ID = getSymbolID(D)) {
+      if (!Opts.OccurrenceOpts->IDs ||
+          llvm::is_contained(*Opts.OccurrenceOpts->IDs, *ID))
+        AddOccurrence(Loc, *ID);
+    }
+  }
+
+private:
+  const SymbolCollector::Options &Opts;
+
+  SymbolSlab::Builder *Builder;
+  ASTContext *ASTCtx;
+};
+
+class SymbolCollector::CollectSymbol {
+public:
+  CollectSymbol(const SymbolCollector::Options &CollectorOpts,
+                SymbolSlab::Builder *Builder)
+      : Opts(CollectorOpts), Symbols(Builder) {
+    assert(Opts.SymOpts && "Symbol option must be set.");
+  }
+
+  void collectDecl(const Decl *D, index::SymbolRoleSet Roles,
+                   ArrayRef<index::SymbolRelation> Relations,
+                   SourceLocation Loc,
+                   index::IndexDataConsumer::ASTNodeInfo ASTNode);
+
+  void collectMacro(const IdentifierInfo *Name, const MacroInfo *MI,
+                    index::SymbolRoleSet Roles, SourceLocation Loc);
+
+  void initialize(ASTContext &Ctx) {
+    ASTCtx = &Ctx;
+    CompletionAllocator = std::make_shared<GlobalCodeCompletionAllocator>();
+    CompletionTUInfo =
+        llvm::make_unique<CodeCompletionTUInfo>(CompletionAllocator);
+  }
+
+  void setPreprocessor(std::shared_ptr<Preprocessor> PP) {
+    this->PP = std::move(PP);
+  }
+
+  void finish();
+
+private:
+  const Symbol *addDeclaration(const NamedDecl &, SymbolID);
+  void addDefinition(const NamedDecl &ND, const Symbol &DeclSym);
+
+  const SymbolCollector::Options &Opts;
+
+  SymbolSlab::Builder *Symbols;
+  ASTContext *ASTCtx;
+
+  std::shared_ptr<Preprocessor> PP;
+  std::shared_ptr<GlobalCodeCompletionAllocator> CompletionAllocator;
+  std::unique_ptr<CodeCompletionTUInfo> CompletionTUInfo;
+  // Symbols referenced from the current TU, flushed on finish().
+  llvm::DenseSet<const NamedDecl *> ReferencedDecls;
+  llvm::DenseSet<const IdentifierInfo *> ReferencedMacros;
+  // Maps canonical declaration provided by clang to canonical declaration for
+  // an index symbol, if clangd prefers a different declaration than that
+  // provided by clang. For example, friend declaration might be considered
+  // canonical by clang but should not be considered canonical in the index
+  // unless it's a definition.
+  llvm::DenseMap<const Decl *, const Decl *> CanonicalDecls;
+};
+
+SymbolCollector::SymbolCollector(Options CollectorOpts)
+    : Opts(std::move(CollectorOpts)) {
+  if (this->Opts.SymOpts)
+    CollectSym = llvm::make_unique<CollectSymbol>(Opts, &Symbols);
+  if (this->Opts.OccurrenceOpts)
+    CollectOccur = llvm::make_unique<CollectOccurrence>(Opts, &Symbols);
+}
+
+SymbolCollector::~SymbolCollector() {}
 
 void SymbolCollector::initialize(ASTContext &Ctx) {
-  ASTCtx = &Ctx;
-  CompletionAllocator = std::make_shared<GlobalCodeCompletionAllocator>();
-  CompletionTUInfo =
-      llvm::make_unique<CodeCompletionTUInfo>(CompletionAllocator);
+  if (CollectSym)
+    CollectSym->initialize(Ctx);
+  if (CollectOccur)
+    CollectOccur->initialize(Ctx);
+}
+
+void SymbolCollector::setPreprocessor(std::shared_ptr<Preprocessor> PP) {
+  if (CollectSym)
+    CollectSym->setPreprocessor(PP);
 }
 
 bool SymbolCollector::shouldCollectSymbol(const NamedDecl &ND,
-                                          ASTContext &ASTCtx,
-                                          const Options &Opts) {
+                                          ASTContext &ASTCtx) {
   using namespace clang::ast_matchers;
   if (ND.isImplicit())
     return false;
@@ -282,7 +407,7 @@ bool SymbolCollector::shouldCollectSymbol(const NamedDecl &ND,
 }
 
 // Always return true to continue indexing.
-bool SymbolCollector::handleDeclOccurence(
+void SymbolCollector::CollectSymbol::collectDecl(
     const Decl *D, index::SymbolRoleSet Roles,
     ArrayRef<index::SymbolRelation> Relations, SourceLocation Loc,
     index::IndexDataConsumer::ASTNodeInfo ASTNode) {
@@ -295,7 +420,7 @@ bool SymbolCollector::handleDeclOccurence(
   if ((ASTNode.OrigD->getFriendObjectKind() !=
        Decl::FriendObjectKind::FOK_None) &&
       !(Roles & static_cast<unsigned>(index::SymbolRole::Definition)))
-    return true;
+    return;
   // A declaration created for a friend declaration should not be used as the
   // canonical declaration in the index. Use OrigD instead, unless we've already
   // picked a replacement for D
@@ -303,12 +428,12 @@ bool SymbolCollector::handleDeclOccurence(
     D = CanonicalDecls.try_emplace(D, ASTNode.OrigD).first->second;
   const NamedDecl *ND = llvm::dyn_cast<NamedDecl>(D);
   if (!ND)
-    return true;
+    return;
 
   // Mark D as referenced if this is a reference coming from the main file.
   // D may not be an interesting symbol, but it's cheaper to check at the end.
   auto &SM = ASTCtx->getSourceManager();
-  if (Opts.CountReferences &&
+  if (Opts.SymOpts->CountReferences &&
       (Roles & static_cast<unsigned>(index::SymbolRole::Reference)) &&
       SM.getFileID(SM.getSpellingLoc(Loc)) == SM.getMainFileID())
     ReferencedDecls.insert(ND);
@@ -316,16 +441,16 @@ bool SymbolCollector::handleDeclOccurence(
   // Don't continue indexing if this is a mere reference.
   if (!(Roles & static_cast<unsigned>(index::SymbolRole::Declaration) ||
         Roles & static_cast<unsigned>(index::SymbolRole::Definition)))
-    return true;
-  if (!shouldCollectSymbol(*ND, *ASTCtx, Opts))
-    return true;
+    return;
+  if (!shouldCollectSymbol(*ND, *ASTCtx))
+    return;
 
   auto ID = getSymbolID(ND);
   if (!ID)
-    return true;
+    return;
 
   const NamedDecl &OriginalDecl = *cast<NamedDecl>(ASTNode.OrigD);
-  const Symbol *BasicSymbol = Symbols.find(*ID);
+  const Symbol *BasicSymbol = Symbols->find(*ID);
   if (!BasicSymbol) // Regardless of role, ND is the canonical declaration.
     BasicSymbol = addDeclaration(*ND, std::move(*ID));
   else if (isPreferredDeclaration(OriginalDecl, Roles))
@@ -337,29 +462,28 @@ bool SymbolCollector::handleDeclOccurence(
 
   if (Roles & static_cast<unsigned>(index::SymbolRole::Definition))
     addDefinition(OriginalDecl, *BasicSymbol);
-  return true;
 }
 
-bool SymbolCollector::handleMacroOccurence(const IdentifierInfo *Name,
-                                           const MacroInfo *MI,
-                                           index::SymbolRoleSet Roles,
-                                           SourceLocation Loc) {
-  if (!Opts.CollectMacro)
-    return true;
+void SymbolCollector::CollectSymbol::collectMacro(const IdentifierInfo *Name,
+                                                  const MacroInfo *MI,
+                                                  index::SymbolRoleSet Roles,
+                                                  SourceLocation Loc) {
+  if (!Opts.SymOpts->CollectMacro)
+    return;
   assert(PP.get());
 
   const auto &SM = PP->getSourceManager();
   if (SM.isInMainFile(SM.getExpansionLoc(MI->getDefinitionLoc())))
-    return true;
+    return;
   // Header guards are not interesting in index. Builtin macros don't have
   // useful locations and are not needed for code completions.
   if (MI->isUsedForHeaderGuard() || MI->isBuiltinMacro())
-    return true;
+    return;
 
   // Mark the macro as referenced if this is a reference coming from the main
   // file. The macro may not be an interesting symbol, but it's cheaper to check
   // at the end.
-  if (Opts.CountReferences &&
+  if (Opts.SymOpts->CountReferences &&
       (Roles & static_cast<unsigned>(index::SymbolRole::Reference)) &&
       SM.getFileID(SM.getSpellingLoc(Loc)) == SM.getMainFileID())
     ReferencedMacros.insert(Name);
@@ -367,17 +491,17 @@ bool SymbolCollector::handleMacroOccurence(const IdentifierInfo *Name,
   // FIXME: remove macro with ID if it is undefined.
   if (!(Roles & static_cast<unsigned>(index::SymbolRole::Declaration) ||
         Roles & static_cast<unsigned>(index::SymbolRole::Definition)))
-    return true;
+    return;
 
   llvm::SmallString<128> USR;
   if (index::generateUSRForMacro(Name->getName(), MI->getDefinitionLoc(), SM,
                                  USR))
-    return true;
+    return;
   SymbolID ID(USR);
 
   // Only collect one instance in case there are multiple.
-  if (Symbols.find(ID) != nullptr)
-    return true;
+  if (Symbols->find(ID) != nullptr)
+    return;
 
   Symbol S;
   S.ID = std::move(ID);
@@ -397,7 +521,8 @@ bool SymbolCollector::handleMacroOccurence(const IdentifierInfo *Name,
   getSignature(*CCS, &Signature, &SnippetSuffix);
 
   std::string Include;
-  if (Opts.CollectIncludePath && shouldCollectIncludePath(S.SymInfo.Kind)) {
+  if (Opts.SymOpts->CollectIncludePath &&
+      shouldCollectIncludePath(S.SymInfo.Kind)) {
     if (auto Header =
             getIncludeHeader(Name->getName(), SM,
                              SM.getExpansionLoc(MI->getDefinitionLoc()), Opts))
@@ -408,17 +533,16 @@ bool SymbolCollector::handleMacroOccurence(const IdentifierInfo *Name,
   Symbol::Details Detail;
   Detail.IncludeHeader = Include;
   S.Detail = &Detail;
-  Symbols.insert(S);
-  return true;
+  Symbols->insert(S);
 }
 
-void SymbolCollector::finish() {
+void SymbolCollector::CollectSymbol::finish() {
   // At the end of the TU, add 1 to the refcount of all referenced symbols.
   auto IncRef = [this](const SymbolID &ID) {
-    if (const auto *S = Symbols.find(ID)) {
+    if (const auto *S = Symbols->find(ID)) {
       Symbol Inc = *S;
       ++Inc.References;
-      Symbols.insert(Inc);
+      Symbols->insert(Inc);
     }
   };
   for (const NamedDecl *ND : ReferencedDecls) {
@@ -426,7 +550,7 @@ void SymbolCollector::finish() {
       IncRef(*ID);
     }
   }
-  if (Opts.CollectMacro) {
+  if (Opts.SymOpts->CollectMacro) {
     assert(PP);
     for (const IdentifierInfo *II : ReferencedMacros) {
       llvm::SmallString<128> USR;
@@ -440,8 +564,9 @@ void SymbolCollector::finish() {
   ReferencedMacros.clear();
 }
 
-const Symbol *SymbolCollector::addDeclaration(const NamedDecl &ND,
-                                              SymbolID ID) {
+const Symbol *
+SymbolCollector::CollectSymbol::addDeclaration(const NamedDecl &ND,
+                                               SymbolID ID) {
   auto &Ctx = ND.getASTContext();
   auto &SM = Ctx.getSourceManager();
 
@@ -477,7 +602,8 @@ const Symbol *SymbolCollector::addDeclaration(const NamedDecl &ND,
   std::string ReturnType = getReturnType(*CCS);
 
   std::string Include;
-  if (Opts.CollectIncludePath && shouldCollectIncludePath(S.SymInfo.Kind)) {
+  if (Opts.SymOpts->CollectIncludePath &&
+      shouldCollectIncludePath(S.SymInfo.Kind)) {
     // Use the expansion location to get the #include header since this is
     // where the symbol is exposed.
     if (auto Header = getIncludeHeader(
@@ -492,13 +618,13 @@ const Symbol *SymbolCollector::addDeclaration(const NamedDecl &ND,
   Detail.IncludeHeader = Include;
   S.Detail = &Detail;
 
-  S.Origin = Opts.Origin;
-  Symbols.insert(S);
-  return Symbols.find(S.ID);
+  S.Origin = Opts.SymOpts->Origin;
+  Symbols->insert(S);
+  return Symbols->find(S.ID);
 }
 
-void SymbolCollector::addDefinition(const NamedDecl &ND,
-                                    const Symbol &DeclSym) {
+void SymbolCollector::CollectSymbol::addDefinition(const NamedDecl &ND,
+                                                   const Symbol &DeclSym) {
   if (DeclSym.Definition)
     return;
   // If we saw some forward declaration, we end up copying the symbol.
@@ -510,7 +636,32 @@ void SymbolCollector::addDefinition(const NamedDecl &ND,
                                      ND.getASTContext().getSourceManager(),
                                      Opts, ASTCtx->getLangOpts(), FileURI))
     S.Definition = *DefLoc;
-  Symbols.insert(S);
+  Symbols->insert(S);
+}
+
+bool SymbolCollector::handleDeclOccurence(
+    const Decl *D, index::SymbolRoleSet Roles,
+    ArrayRef<index::SymbolRelation> Relations, SourceLocation Loc,
+    index::IndexDataConsumer::ASTNodeInfo ASTNode) {
+  if (CollectSym)
+    CollectSym->collectDecl(D, Roles, Relations, Loc, ASTNode);
+  if (CollectOccur)
+    CollectOccur->collectDecl(D, Roles, Relations, Loc, ASTNode);
+  return true;
+}
+
+bool SymbolCollector::handleMacroOccurence(const IdentifierInfo *Name,
+                                           const MacroInfo *MI,
+                                           index::SymbolRoleSet Roles,
+                                           SourceLocation Loc) {
+  if (CollectSym)
+    CollectSym->collectMacro(Name, MI, Roles, Loc);
+  return true;
+}
+
+void SymbolCollector::finish() {
+  if (CollectSym)
+    CollectSym->finish();
 }
 
 } // namespace clangd

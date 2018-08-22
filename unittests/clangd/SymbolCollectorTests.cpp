@@ -74,6 +74,14 @@ MATCHER_P(Refs, R, "") { return int(arg.References) == R; }
 MATCHER_P(ForCodeCompletion, IsIndexedForCodeCompletion, "") {
   return arg.IsIndexedForCodeCompletion == IsIndexedForCodeCompletion;
 }
+MATCHER(OccurrenceRange, "") {
+  const clang::clangd::SymbolOccurrence &Pos = testing::get<0>(arg);
+  const clang::clangd::Range &Range = testing::get<1>(arg);
+  return std::tie(Pos.Location.Start.Line, Pos.Location.Start.Column,
+                  Pos.Location.End.Line, Pos.Location.End.Column) ==
+         std::tie(Range.start.line, Range.start.character, Range.end.line,
+                  Range.end.character);
+}
 
 namespace clang {
 namespace clangd {
@@ -95,7 +103,7 @@ public:
     assert(AST.hasValue());
     return SymbolCollector::shouldCollectSymbol(
         Qualified ? findDecl(*AST, Name) : findAnyDecl(*AST, Name),
-        AST->getASTContext(), SymbolCollector::Options());
+        AST->getASTContext());
   }
 
 protected:
@@ -162,8 +170,10 @@ TEST_F(ShouldCollectSymbolTest, DoubleCheckProtoHeaderComment) {
 class SymbolIndexActionFactory : public tooling::FrontendActionFactory {
 public:
   SymbolIndexActionFactory(SymbolCollector::Options COpts,
-                           CommentHandler *PragmaHandler)
-      : COpts(std::move(COpts)), PragmaHandler(PragmaHandler) {}
+                           CommentHandler *PragmaHandler,
+                           index::IndexingOptions IndexOpts)
+      : COpts(std::move(COpts)), PragmaHandler(PragmaHandler),
+        IndexOpts(IndexOpts) {}
 
   clang::FrontendAction *create() override {
     class WrappedIndexAction : public WrapperFrontendAction {
@@ -186,10 +196,6 @@ public:
       index::IndexingOptions IndexOpts;
       CommentHandler *PragmaHandler;
     };
-    index::IndexingOptions IndexOpts;
-    IndexOpts.SystemSymbolFilter =
-        index::IndexingOptions::SystemSymbolFilterKind::All;
-    IndexOpts.IndexFunctionLocals = false;
     Collector = std::make_shared<SymbolCollector>(COpts);
     return new WrappedIndexAction(Collector, std::move(IndexOpts),
                                   PragmaHandler);
@@ -198,6 +204,8 @@ public:
   std::shared_ptr<SymbolCollector> Collector;
   SymbolCollector::Options COpts;
   CommentHandler *PragmaHandler;
+
+  index::IndexingOptions IndexOpts;
 };
 
 class SymbolCollectorTest : public ::testing::Test {
@@ -210,13 +218,52 @@ public:
     TestFileURI = URI::createFile(TestFileName).toString();
   }
 
+  bool collectSymbols(StringRef HeaderCode, StringRef MainCode,
+                      const std::vector<std::string> &ExtraArgs = {}) {
+    index::IndexingOptions IndexOpts;
+    IndexOpts.SystemSymbolFilter =
+        index::IndexingOptions::SystemSymbolFilterKind::All;
+    IndexOpts.IndexFunctionLocals = false;
+    CollectorOpts.SymOpts = &CollectSymOpts;
+    CollectorOpts.OccurrenceOpts = nullptr;
+    return runSymbolCollector(HeaderCode, MainCode, CollectorOpts, IndexOpts,
+                              ExtraArgs);
+  }
+
+  bool collectOccurrences(StringRef HeaderCode, StringRef MainCode,
+                          const std::vector<std::string> &ExtraArgs = {}) {
+    index::IndexingOptions IndexOpts;
+    IndexOpts.SystemSymbolFilter =
+        index::IndexingOptions::SystemSymbolFilterKind::All;
+    IndexOpts.IndexFunctionLocals = true;
+    CollectorOpts.SymOpts = nullptr;
+    CollectorOpts.OccurrenceOpts = &CollectOccurrenceOpts;
+    return runSymbolCollector(HeaderCode, MainCode, CollectorOpts, IndexOpts,
+                              ExtraArgs);
+  }
+
+protected:
+  llvm::IntrusiveRefCntPtr<vfs::InMemoryFileSystem> InMemoryFileSystem;
+  std::string TestHeaderName;
+  std::string TestHeaderURI;
+  std::string TestFileName;
+  std::string TestFileURI;
+  SymbolSlab Symbols;
+  SymbolCollector::Options CollectorOpts;
+  SymbolCollector::Options::CollectSymbolOptions CollectSymOpts;
+  SymbolCollector::Options::CollectOccurrenceOptions CollectOccurrenceOpts;
+  std::unique_ptr<CommentHandler> PragmaHandler;
+
+private:
   bool runSymbolCollector(StringRef HeaderCode, StringRef MainCode,
+                          SymbolCollector::Options Opts,
+                          index::IndexingOptions IndexOpts,
                           const std::vector<std::string> &ExtraArgs = {}) {
     llvm::IntrusiveRefCntPtr<FileManager> Files(
         new FileManager(FileSystemOptions(), InMemoryFileSystem));
 
     auto Factory = llvm::make_unique<SymbolIndexActionFactory>(
-        CollectorOpts, PragmaHandler.get());
+        Opts, PragmaHandler.get(), std::move(IndexOpts));
 
     std::vector<std::string> Args = {
         "symbol_collector", "-fsyntax-only", "-xc++",
@@ -239,16 +286,6 @@ public:
     Symbols = Factory->Collector->takeSymbols();
     return true;
   }
-
-protected:
-  llvm::IntrusiveRefCntPtr<vfs::InMemoryFileSystem> InMemoryFileSystem;
-  std::string TestHeaderName;
-  std::string TestHeaderURI;
-  std::string TestFileName;
-  std::string TestFileURI;
-  SymbolSlab Symbols;
-  SymbolCollector::Options CollectorOpts;
-  std::unique_ptr<CommentHandler> PragmaHandler;
 };
 
 TEST_F(SymbolCollectorTest, CollectSymbols) {
@@ -300,7 +337,7 @@ TEST_F(SymbolCollectorTest, CollectSymbols) {
     using bar::v2;
     } // namespace foo
   )";
-  runSymbolCollector(Header, /*Main=*/"");
+  collectSymbols(Header, /*Main=*/"");
   EXPECT_THAT(Symbols,
               UnorderedElementsAreArray(
                   {AllOf(QName("Foo"), ForCodeCompletion(true)),
@@ -334,7 +371,7 @@ TEST_F(SymbolCollectorTest, Template) {
     extern template struct Tmpl<float>;
     template struct Tmpl<double>;
   )");
-  runSymbolCollector(Header.code(), /*Main=*/"");
+  collectSymbols(Header.code(), /*Main=*/"");
   EXPECT_THAT(Symbols,
               UnorderedElementsAreArray(
                   {AllOf(QName("Tmpl"), DeclRange(Header.range())),
@@ -369,7 +406,7 @@ TEST_F(SymbolCollectorTest, ObjCSymbols) {
     @end
   )";
   TestFileName = "test.m";
-  runSymbolCollector(Header, /*Main=*/"", {"-fblocks", "-xobjective-c++"});
+  collectSymbols(Header, /*Main=*/"", {"-fblocks", "-xobjective-c++"});
   EXPECT_THAT(Symbols,
               UnorderedElementsAre(
                   QName("Person"), QName("Person::someMethodName:lastName:"),
@@ -398,7 +435,7 @@ o]]();
     // Declared/defined in main only.
     int Y;
   )cpp");
-  runSymbolCollector(Header.code(), Main.code());
+  collectSymbols(Header.code(), Main.code());
   EXPECT_THAT(
       Symbols,
       UnorderedElementsAre(
@@ -431,8 +468,9 @@ TEST_F(SymbolCollectorTest, References) {
     class Y{}; // definition doesn't count as a reference
     GLOBAL_Z(z); // Not a reference to Z, we don't spell the type.
   )";
-  CollectorOpts.CountReferences = true;
-  runSymbolCollector(Header, Main);
+
+  CollectSymOpts.CountReferences = true;
+  collectSymbols(Header, Main);
   EXPECT_THAT(Symbols,
               UnorderedElementsAre(AllOf(QName("W"), Refs(1)),
                                    AllOf(QName("X"), Refs(1)),
@@ -441,7 +479,7 @@ TEST_F(SymbolCollectorTest, References) {
 }
 
 TEST_F(SymbolCollectorTest, SymbolRelativeNoFallback) {
-  runSymbolCollector("class Foo {};", /*Main=*/"");
+  collectSymbols("class Foo {};", /*Main=*/"");
   EXPECT_THAT(Symbols, UnorderedElementsAre(
                            AllOf(QName("Foo"), DeclURI(TestHeaderURI))));
 }
@@ -451,7 +489,7 @@ TEST_F(SymbolCollectorTest, SymbolRelativeWithFallback) {
   TestFileName = "x.cpp";
   TestHeaderURI = URI::createFile(testPath(TestHeaderName)).toString();
   CollectorOpts.FallbackDir = testRoot();
-  runSymbolCollector("class Foo {};", /*Main=*/"");
+  collectSymbols("class Foo {};", /*Main=*/"");
   EXPECT_THAT(Symbols,
               UnorderedElementsAre(AllOf(QName("Foo"), DeclURI(TestHeaderURI))));
 }
@@ -461,7 +499,7 @@ TEST_F(SymbolCollectorTest, CustomURIScheme) {
   CollectorOpts.URISchemes.insert(CollectorOpts.URISchemes.begin(), "unittest");
   TestHeaderName = testPath("x.h");
   TestFileName = testPath("x.cpp");
-  runSymbolCollector("class Foo {};", /*Main=*/"");
+  collectSymbols("class Foo {};", /*Main=*/"");
   EXPECT_THAT(Symbols, UnorderedElementsAre(
                            AllOf(QName("Foo"), DeclURI("unittest:///x.h"))));
 }
@@ -469,14 +507,14 @@ TEST_F(SymbolCollectorTest, CustomURIScheme) {
 TEST_F(SymbolCollectorTest, InvalidURIScheme) {
   // Use test URI scheme from URITests.cpp
   CollectorOpts.URISchemes = {"invalid"};
-  runSymbolCollector("class Foo {};", /*Main=*/"");
+  collectSymbols("class Foo {};", /*Main=*/"");
   EXPECT_THAT(Symbols, UnorderedElementsAre(AllOf(QName("Foo"), DeclURI(""))));
 }
 
 TEST_F(SymbolCollectorTest, FallbackToFileURI) {
   // Use test URI scheme from URITests.cpp
   CollectorOpts.URISchemes = {"invalid", "file"};
-  runSymbolCollector("class Foo {};", /*Main=*/"");
+  collectSymbols("class Foo {};", /*Main=*/"");
   EXPECT_THAT(Symbols, UnorderedElementsAre(
                            AllOf(QName("Foo"), DeclURI(TestHeaderURI))));
 }
@@ -498,7 +536,7 @@ TEST_F(SymbolCollectorTest, IncludeEnums) {
     };
     }
   )";
-  runSymbolCollector(Header, /*Main=*/"");
+  collectSymbols(Header, /*Main=*/"");
   EXPECT_THAT(Symbols,
               UnorderedElementsAre(
                   AllOf(QName("Red"), ForCodeCompletion(true)),
@@ -516,7 +554,7 @@ TEST_F(SymbolCollectorTest, NamelessSymbols) {
       int a;
     } Foo;
   )";
-  runSymbolCollector(Header, /*Main=*/"");
+  collectSymbols(Header, /*Main=*/"");
   EXPECT_THAT(Symbols, UnorderedElementsAre(QName("Foo"),
                                             QName("(anonymous struct)::a")));
 }
@@ -535,7 +573,7 @@ TEST_F(SymbolCollectorTest, SymbolFormedFromMacro) {
     FF2();
   )");
 
-  runSymbolCollector(Header.code(), /*Main=*/"");
+  collectSymbols(Header.code(), /*Main=*/"");
   EXPECT_THAT(
       Symbols,
       UnorderedElementsAre(
@@ -552,8 +590,8 @@ TEST_F(SymbolCollectorTest, SymbolFormedByCLI) {
     #endif
   )");
 
-  runSymbolCollector(Header.code(), /*Main=*/"",
-                     /*ExtraArgs=*/{"-DNAME=name"});
+  collectSymbols(Header.code(), /*Main=*/"",
+                 /*ExtraArgs=*/{"-DNAME=name"});
   EXPECT_THAT(Symbols,
               UnorderedElementsAre(AllOf(
                   QName("name"),
@@ -574,7 +612,7 @@ TEST_F(SymbolCollectorTest, IgnoreSymbolsInMainFile) {
     void main_f() {} // ignore
     void f1() {}
   )";
-  runSymbolCollector(Header, Main);
+  collectSymbols(Header, Main);
   EXPECT_THAT(Symbols,
               UnorderedElementsAre(QName("Foo"), QName("f1"), QName("f2")));
 }
@@ -593,7 +631,7 @@ TEST_F(SymbolCollectorTest, ClassMembers) {
     void Foo::g() {}
     void Foo::ssf() {}
   )";
-  runSymbolCollector(Header, Main);
+  collectSymbols(Header, Main);
   EXPECT_THAT(Symbols,
               UnorderedElementsAre(QName("Foo"), QName("Foo::f"),
                                    QName("Foo::g"), QName("Foo::sf"),
@@ -609,7 +647,7 @@ TEST_F(SymbolCollectorTest, Scopes) {
     }
     }
   )";
-  runSymbolCollector(Header, /*Main=*/"");
+  collectSymbols(Header, /*Main=*/"");
   EXPECT_THAT(Symbols,
               UnorderedElementsAre(QName("na"), QName("na::nb"),
                                    QName("na::Foo"), QName("na::nb::Bar")));
@@ -622,7 +660,7 @@ TEST_F(SymbolCollectorTest, ExternC) {
     extern "C" { class Bar {}; }
     }
   )";
-  runSymbolCollector(Header, /*Main=*/"");
+  collectSymbols(Header, /*Main=*/"");
   EXPECT_THAT(Symbols, UnorderedElementsAre(QName("na"), QName("Foo"),
                                             QName("na::Bar")));
 }
@@ -641,7 +679,7 @@ TEST_F(SymbolCollectorTest, SkipInlineNamespace) {
     }
     }
   )";
-  runSymbolCollector(Header, /*Main=*/"");
+  collectSymbols(Header, /*Main=*/"");
   EXPECT_THAT(Symbols,
               UnorderedElementsAre(QName("na"), QName("na::nb"),
                                    QName("na::Foo"), QName("na::Bar")));
@@ -654,7 +692,7 @@ TEST_F(SymbolCollectorTest, SymbolWithDocumentation) {
     int ff(int x, double y) { return 0; }
     }
   )";
-  runSymbolCollector(Header, /*Main=*/"");
+  collectSymbols(Header, /*Main=*/"");
   EXPECT_THAT(
       Symbols,
       UnorderedElementsAre(
@@ -669,7 +707,7 @@ TEST_F(SymbolCollectorTest, Snippet) {
     int ff(int x, double y) { return 0; }
     }
   )";
-  runSymbolCollector(Header, /*Main=*/"");
+  collectSymbols(Header, /*Main=*/"");
   EXPECT_THAT(Symbols,
               UnorderedElementsAre(
                   QName("nx"),
@@ -749,8 +787,8 @@ CompletionSnippetSuffix:    '-snippet'
 }
 
 TEST_F(SymbolCollectorTest, IncludeHeaderSameAsFileURI) {
-  CollectorOpts.CollectIncludePath = true;
-  runSymbolCollector("class Foo {};", /*Main=*/"");
+  CollectSymOpts.CollectIncludePath = true;
+  collectSymbols("class Foo {};", /*Main=*/"");
   EXPECT_THAT(Symbols,
               UnorderedElementsAre(AllOf(QName("Foo"), DeclURI(TestHeaderURI),
                                          IncludeHeader(TestHeaderURI))));
@@ -758,15 +796,15 @@ TEST_F(SymbolCollectorTest, IncludeHeaderSameAsFileURI) {
 
 #ifndef _WIN32
 TEST_F(SymbolCollectorTest, CanonicalSTLHeader) {
-  CollectorOpts.CollectIncludePath = true;
+  CollectSymOpts.CollectIncludePath = true;
   CanonicalIncludes Includes;
   addSystemHeadersMapping(&Includes);
-  CollectorOpts.Includes = &Includes;
+  CollectSymOpts.Includes = &Includes;
   // bits/basic_string.h$ should be mapped to <string>
   TestHeaderName = "/nasty/bits/basic_string.h";
   TestFileName = "/nasty/bits/basic_string.cpp";
   TestHeaderURI = URI::createFile(TestHeaderName).toString();
-  runSymbolCollector("class string {};", /*Main=*/"");
+  collectSymbols("class string {};", /*Main=*/"");
   EXPECT_THAT(Symbols, UnorderedElementsAre(AllOf(QName("string"),
                                                   DeclURI(TestHeaderURI),
                                                   IncludeHeader("<string>"))));
@@ -774,10 +812,10 @@ TEST_F(SymbolCollectorTest, CanonicalSTLHeader) {
 #endif
 
 TEST_F(SymbolCollectorTest, STLiosfwd) {
-  CollectorOpts.CollectIncludePath = true;
+  CollectSymOpts.CollectIncludePath = true;
   CanonicalIncludes Includes;
   addSystemHeadersMapping(&Includes);
-  CollectorOpts.Includes = &Includes;
+  CollectSymOpts.Includes = &Includes;
   // Symbols from <iosfwd> should be mapped individually.
   TestHeaderName = testPath("iosfwd");
   TestFileName = testPath("iosfwd.cpp");
@@ -789,7 +827,7 @@ TEST_F(SymbolCollectorTest, STLiosfwd) {
       class filebuf {};
     } // namespace std
   )";
-  runSymbolCollector(Header, /*Main=*/"");
+  collectSymbols(Header, /*Main=*/"");
   EXPECT_THAT(Symbols,
               UnorderedElementsAre(
                   QName("std"),
@@ -800,46 +838,46 @@ TEST_F(SymbolCollectorTest, STLiosfwd) {
 }
 
 TEST_F(SymbolCollectorTest, IWYUPragma) {
-  CollectorOpts.CollectIncludePath = true;
+  CollectSymOpts.CollectIncludePath = true;
   CanonicalIncludes Includes;
   PragmaHandler = collectIWYUHeaderMaps(&Includes);
-  CollectorOpts.Includes = &Includes;
+  CollectSymOpts.Includes = &Includes;
   const std::string Header = R"(
     // IWYU pragma: private, include the/good/header.h
     class Foo {};
   )";
-  runSymbolCollector(Header, /*Main=*/"");
+  collectSymbols(Header, /*Main=*/"");
   EXPECT_THAT(Symbols, UnorderedElementsAre(
                            AllOf(QName("Foo"), DeclURI(TestHeaderURI),
                                  IncludeHeader("\"the/good/header.h\""))));
 }
 
 TEST_F(SymbolCollectorTest, IWYUPragmaWithDoubleQuotes) {
-  CollectorOpts.CollectIncludePath = true;
+  CollectSymOpts.CollectIncludePath = true;
   CanonicalIncludes Includes;
   PragmaHandler = collectIWYUHeaderMaps(&Includes);
-  CollectorOpts.Includes = &Includes;
+  CollectSymOpts.Includes = &Includes;
   const std::string Header = R"(
     // IWYU pragma: private, include "the/good/header.h"
     class Foo {};
   )";
-  runSymbolCollector(Header, /*Main=*/"");
+  collectSymbols(Header, /*Main=*/"");
   EXPECT_THAT(Symbols, UnorderedElementsAre(
                            AllOf(QName("Foo"), DeclURI(TestHeaderURI),
                                  IncludeHeader("\"the/good/header.h\""))));
 }
 
 TEST_F(SymbolCollectorTest, SkipIncFileWhenCanonicalizeHeaders) {
-  CollectorOpts.CollectIncludePath = true;
+  CollectSymOpts.CollectIncludePath = true;
   CanonicalIncludes Includes;
   Includes.addMapping(TestHeaderName, "<canonical>");
-  CollectorOpts.Includes = &Includes;
+  CollectSymOpts.Includes = &Includes;
   auto IncFile = testPath("test.inc");
   auto IncURI = URI::createFile(IncFile).toString();
   InMemoryFileSystem->addFile(IncFile, 0,
                               llvm::MemoryBuffer::getMemBuffer("class X {};"));
-  runSymbolCollector("#include \"test.inc\"\nclass Y {};", /*Main=*/"",
-                     /*ExtraArgs=*/{"-I", testRoot()});
+  collectSymbols("#include \"test.inc\"\nclass Y {};", /*Main=*/"",
+                 /*ExtraArgs=*/{"-I", testRoot()});
   EXPECT_THAT(Symbols,
               UnorderedElementsAre(AllOf(QName("X"), DeclURI(IncURI),
                                          IncludeHeader("<canonical>")),
@@ -848,53 +886,53 @@ TEST_F(SymbolCollectorTest, SkipIncFileWhenCanonicalizeHeaders) {
 }
 
 TEST_F(SymbolCollectorTest, MainFileIsHeaderWhenSkipIncFile) {
-  CollectorOpts.CollectIncludePath = true;
+  CollectSymOpts.CollectIncludePath = true;
   CanonicalIncludes Includes;
-  CollectorOpts.Includes = &Includes;
+  CollectSymOpts.Includes = &Includes;
   TestFileName = testPath("main.h");
   TestFileURI = URI::createFile(TestFileName).toString();
   auto IncFile = testPath("test.inc");
   auto IncURI = URI::createFile(IncFile).toString();
   InMemoryFileSystem->addFile(IncFile, 0,
                               llvm::MemoryBuffer::getMemBuffer("class X {};"));
-  runSymbolCollector("", /*Main=*/"#include \"test.inc\"",
-                     /*ExtraArgs=*/{"-I", testRoot()});
+  collectSymbols("", /*Main=*/"#include \"test.inc\"",
+                 /*ExtraArgs=*/{"-I", testRoot()});
   EXPECT_THAT(Symbols, UnorderedElementsAre(AllOf(QName("X"), DeclURI(IncURI),
                                                   IncludeHeader(TestFileURI))));
 }
 
 TEST_F(SymbolCollectorTest, MainFileIsHeaderWithoutExtensionWhenSkipIncFile) {
-  CollectorOpts.CollectIncludePath = true;
+  CollectSymOpts.CollectIncludePath = true;
   CanonicalIncludes Includes;
-  CollectorOpts.Includes = &Includes;
+  CollectSymOpts.Includes = &Includes;
   TestFileName = testPath("no_ext_main");
   TestFileURI = URI::createFile(TestFileName).toString();
   auto IncFile = testPath("test.inc");
   auto IncURI = URI::createFile(IncFile).toString();
   InMemoryFileSystem->addFile(IncFile, 0,
                               llvm::MemoryBuffer::getMemBuffer("class X {};"));
-  runSymbolCollector("", /*Main=*/"#include \"test.inc\"",
-                     /*ExtraArgs=*/{"-I", testRoot()});
+  collectSymbols("", /*Main=*/"#include \"test.inc\"",
+                 /*ExtraArgs=*/{"-I", testRoot()});
   EXPECT_THAT(Symbols, UnorderedElementsAre(AllOf(QName("X"), DeclURI(IncURI),
                                                   IncludeHeader(TestFileURI))));
 }
 
 TEST_F(SymbolCollectorTest, FallbackToIncFileWhenIncludingFileIsCC) {
-  CollectorOpts.CollectIncludePath = true;
+  CollectSymOpts.CollectIncludePath = true;
   CanonicalIncludes Includes;
-  CollectorOpts.Includes = &Includes;
+  CollectSymOpts.Includes = &Includes;
   auto IncFile = testPath("test.inc");
   auto IncURI = URI::createFile(IncFile).toString();
   InMemoryFileSystem->addFile(IncFile, 0,
                               llvm::MemoryBuffer::getMemBuffer("class X {};"));
-  runSymbolCollector("", /*Main=*/"#include \"test.inc\"",
-                     /*ExtraArgs=*/{"-I", testRoot()});
+  collectSymbols("", /*Main=*/"#include \"test.inc\"",
+                 /*ExtraArgs=*/{"-I", testRoot()});
   EXPECT_THAT(Symbols, UnorderedElementsAre(AllOf(QName("X"), DeclURI(IncURI),
                                                   IncludeHeader(IncURI))));
 }
 
 TEST_F(SymbolCollectorTest, AvoidUsingFwdDeclsAsCanonicalDecls) {
-  CollectorOpts.CollectIncludePath = true;
+  CollectSymOpts.CollectIncludePath = true;
   Annotations Header(R"(
     // Forward declarations of TagDecls.
     class C;
@@ -906,7 +944,7 @@ TEST_F(SymbolCollectorTest, AvoidUsingFwdDeclsAsCanonicalDecls) {
     struct $sdecl[[S]] {};
     union $udecl[[U]] {int $xdecl[[x]]; bool $ydecl[[y]];};
   )");
-  runSymbolCollector(Header.code(), /*Main=*/"");
+  collectSymbols(Header.code(), /*Main=*/"");
   EXPECT_THAT(
       Symbols,
       UnorderedElementsAre(
@@ -928,8 +966,9 @@ TEST_F(SymbolCollectorTest, AvoidUsingFwdDeclsAsCanonicalDecls) {
 }
 
 TEST_F(SymbolCollectorTest, ClassForwardDeclarationIsCanonical) {
-  CollectorOpts.CollectIncludePath = true;
-  runSymbolCollector(/*Header=*/"class X;", /*Main=*/"class X {};");
+  CollectSymOpts.CollectIncludePath = true;
+
+  collectSymbols(/*Header=*/"class X;", /*Main=*/"class X {};");
   EXPECT_THAT(Symbols, UnorderedElementsAre(AllOf(
                            QName("X"), DeclURI(TestHeaderURI),
                            IncludeHeader(TestHeaderURI), DefURI(TestFileURI))));
@@ -938,7 +977,7 @@ TEST_F(SymbolCollectorTest, ClassForwardDeclarationIsCanonical) {
 TEST_F(SymbolCollectorTest, UTF16Character) {
   // ö is 2-bytes.
   Annotations Header(/*Header=*/"class [[pörk]] {};");
-  runSymbolCollector(Header.code(), /*Main=*/"");
+  collectSymbols(Header.code(), /*Main=*/"");
   EXPECT_THAT(Symbols, UnorderedElementsAre(
                            AllOf(QName("pörk"), DeclRange(Header.range()))));
 }
@@ -957,7 +996,7 @@ TEST_F(SymbolCollectorTest, DoNotIndexSymbolsInFriendDecl) {
       void $foo[[foo]]();
     }
   )");
-  runSymbolCollector(Header.code(), /*Main=*/"");
+  collectSymbols(Header.code(), /*Main=*/"");
 
   EXPECT_THAT(Symbols,
               UnorderedElementsAre(
@@ -979,21 +1018,21 @@ TEST_F(SymbolCollectorTest, ReferencesInFriendDecl) {
       friend class Y;
     };
   )";
-  CollectorOpts.CountReferences = true;
-  runSymbolCollector(Header, Main);
+  CollectSymOpts.CountReferences = true;
+  collectSymbols(Header, Main);
   EXPECT_THAT(Symbols, UnorderedElementsAre(AllOf(QName("X"), Refs(1)),
                                             AllOf(QName("Y"), Refs(1))));
 }
 
 TEST_F(SymbolCollectorTest, Origin) {
-  CollectorOpts.Origin = SymbolOrigin::Static;
-  runSymbolCollector("class Foo {};", /*Main=*/"");
+  CollectSymOpts.Origin = SymbolOrigin::Static;
+  collectSymbols("class Foo {};", /*Main=*/"");
   EXPECT_THAT(Symbols, UnorderedElementsAre(
                            Field(&Symbol::Origin, SymbolOrigin::Static)));
 }
 
 TEST_F(SymbolCollectorTest, CollectMacros) {
-  CollectorOpts.CollectIncludePath = true;
+  CollectSymOpts.CollectIncludePath = true;
   Annotations Header(R"(
     #define X 1
     #define $mac[[MAC]](x) int x
@@ -1005,9 +1044,9 @@ TEST_F(SymbolCollectorTest, CollectMacros) {
     #define MAIN 1  // not indexed
     USED(t);
   )";
-  CollectorOpts.CountReferences = true;
-  CollectorOpts.CollectMacro = true;
-  runSymbolCollector(Header.code(), Main);
+  CollectSymOpts.CountReferences = true;
+  CollectSymOpts.CollectMacro = true;
+  collectSymbols(Header.code(), Main);
   EXPECT_THAT(
       Symbols,
       UnorderedElementsAre(
@@ -1016,6 +1055,59 @@ TEST_F(SymbolCollectorTest, CollectMacros) {
                 IncludeHeader(TestHeaderURI)),
           AllOf(Labeled("MAC(x)"), Refs(0), DeclRange(Header.range("mac"))),
           AllOf(Labeled("USED(y)"), Refs(1), DeclRange(Header.range("used")))));
+}
+
+TEST_F(SymbolCollectorTest, CollectReference) {
+  const std::string Header(R"(
+  class Foo {
+  public:
+    Foo() {}
+    Foo(int);
+  };
+  class Bar;
+  void func();)");
+
+  Annotations Main(R"(
+  class $bar[[Bar]] {};
+
+  void $func[[func]]();
+
+  void fff() {
+    $foo[[Foo]] foo;
+    $bar[[Bar]] bar;
+    $func[[func]]();
+    int abc = 0;
+    $foo[[Foo]] foo2 = abc;
+  })");
+
+  auto H = TestTU::withHeaderCode(Header);
+  auto HeaderSymbols = H.headerSymbols();
+  auto Foo = findSymbol(HeaderSymbols, "Foo");
+  auto Bar = findSymbol(HeaderSymbols, "Bar");
+  auto Func = findSymbol(HeaderSymbols, "func");
+
+  CollectOccurrenceOpts.Filter = SymbolOccurrenceKind::Declaration |
+                                 SymbolOccurrenceKind::Definition |
+                                 SymbolOccurrenceKind::Reference;
+  CollectOccurrenceOpts.IDs = llvm::None;
+  collectOccurrences(Header, Main.code());
+  EXPECT_THAT(
+      Symbols.findOccurrences(Foo.ID),
+      testing::UnorderedPointwise(OccurrenceRange(), Main.ranges("foo")));
+  EXPECT_THAT(
+      Symbols.findOccurrences(Bar.ID),
+      testing::UnorderedPointwise(OccurrenceRange(), Main.ranges("bar")));
+  EXPECT_THAT(
+      Symbols.findOccurrences(Func.ID),
+      testing::UnorderedPointwise(OccurrenceRange(), Main.ranges("func")));
+
+  CollectOccurrenceOpts.IDs = {Foo.ID};
+  collectOccurrences(Header, Main.code());
+  EXPECT_THAT(
+      Symbols.findOccurrences(Foo.ID),
+      testing::UnorderedPointwise(OccurrenceRange(), Main.ranges("foo")));
+  EXPECT_THAT(Symbols.findOccurrences(Bar.ID), testing::IsEmpty());
+  EXPECT_THAT(Symbols.findOccurrences(Func.ID), testing::IsEmpty());
 }
 
 } // namespace

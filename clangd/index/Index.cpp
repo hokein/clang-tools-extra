@@ -114,6 +114,11 @@ void SymbolSlab::Builder::insert(const Symbol &S) {
     own(Copy, UniqueStrings, Arena);
   }
 }
+void SymbolSlab::Builder::insert(const SymbolID &ID,
+                                 SymbolOccurrence Occurrence) {
+  Occurrence.Location.FileURI = UniqueStrings.save(Occurrence.Location.FileURI);
+  SymbolOccurrences[ID].push_back(std::move(Occurrence));
+}
 
 SymbolSlab SymbolSlab::Builder::build() && {
   Symbols = {Symbols.begin(), Symbols.end()}; // Force shrink-to-fit.
@@ -125,7 +130,47 @@ SymbolSlab SymbolSlab::Builder::build() && {
   llvm::UniqueStringSaver Strings(NewArena);
   for (auto &S : Symbols)
     own(S, Strings, NewArena);
-  return SymbolSlab(std::move(NewArena), std::move(Symbols));
+
+  // We may have duplicated symbol occurrences (as some AST nodes have been
+  // visited multiple times). Deduplicate them.
+  for (auto &IDAndOccurrences : SymbolOccurrences) {
+    auto &Occurrences = IDAndOccurrences.getSecond();
+    std::sort(Occurrences.begin(), Occurrences.end());
+    Occurrences.erase(std::unique(Occurrences.begin(), Occurrences.end()),
+                      Occurrences.end());
+
+    for (auto &O : Occurrences)
+      O.Location.FileURI = UniqueStrings.save(O.Location.FileURI);
+  }
+
+  return SymbolSlab(std::move(NewArena), std::move(Symbols),
+                    std::move(SymbolOccurrences));
+}
+
+raw_ostream &operator<<(raw_ostream &OS, SymbolOccurrenceKind K) {
+  if (K == SymbolOccurrenceKind::Unknown)
+    return OS << "Unknown";
+  static const std::vector<const char*> Messages = {
+    "Declaration",
+    "Definition",
+    "Reference"
+  };
+  bool VisitedOnce = false;
+  for (unsigned I = 0; I < Messages.size(); ++I) {
+    if (static_cast<uint8_t>(K) & 1u << I) {
+      if (VisitedOnce)
+        OS << ", ";
+      OS << Messages[I];
+      VisitedOnce = true;
+    }
+  }
+  return OS;
+}
+
+llvm::raw_ostream &operator<<(llvm::raw_ostream &OS,
+                              const SymbolOccurrence &Occurrence) {
+  OS << Occurrence.Location << ":" << Occurrence.Kind;
+  return OS;
 }
 
 } // namespace clangd

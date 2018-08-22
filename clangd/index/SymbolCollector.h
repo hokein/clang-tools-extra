@@ -37,42 +37,56 @@ namespace clangd {
 class SymbolCollector : public index::IndexDataConsumer {
 public:
   struct Options {
+    struct CollectSymbolOptions {
+      bool CollectIncludePath = false;
+      /// If set, this is used to map symbol #include path to a potentially
+      /// different #include path.
+      const CanonicalIncludes *Includes = nullptr;
+      // Populate the Symbol.References field.
+      bool CountReferences = false;
+      // Every symbol collected will be stamped with this origin.
+      SymbolOrigin Origin = SymbolOrigin::Unknown;
+      /// Collect macros.
+      /// Note that SymbolCollector must be run with preprocessor in order to
+      /// collect macros. For example, `indexTopLevelDecls` will not index any
+      /// macro even if this is true.
+      bool CollectMacro = false;
+    };
+    struct CollectOccurrenceOptions {
+      SymbolOccurrenceKind Filter;
+      // A whitelist symbols which will be collected.
+      // If none, all symbol occurrences will be collected.
+      llvm::Optional<llvm::DenseSet<SymbolID>> IDs = llvm::None;
+    };
+
+    /// Specifies URI schemes that can be used to generate URIs for file paths
+    /// in symbols. The list of schemes will be tried in order until a working
+    /// scheme is found. If no scheme works, symbol location will be dropped.
+    std::vector<std::string> URISchemes = {"file"};
+
     /// When symbol paths cannot be resolved to absolute paths (e.g. files in
     /// VFS that does not have absolute path), combine the fallback directory
     /// with symbols' paths to get absolute paths. This must be an absolute
     /// path.
     std::string FallbackDir;
-    /// Specifies URI schemes that can be used to generate URIs for file paths
-    /// in symbols. The list of schemes will be tried in order until a working
-    /// scheme is found. If no scheme works, symbol location will be dropped.
-    std::vector<std::string> URISchemes = {"file"};
-    bool CollectIncludePath = false;
-    /// If set, this is used to map symbol #include path to a potentially
-    /// different #include path.
-    const CanonicalIncludes *Includes = nullptr;
-    // Populate the Symbol.References field.
-    bool CountReferences = false;
-    // Every symbol collected will be stamped with this origin.
-    SymbolOrigin Origin = SymbolOrigin::Unknown;
-    /// Collect macros.
-    /// Note that SymbolCollector must be run with preprocessor in order to
-    /// collect macros. For example, `indexTopLevelDecls` will not index any
-    /// macro even if this is true.
-    bool CollectMacro = false;
+
+    // If not null, SymbolCollector will collect symbols.
+    const CollectSymbolOptions *SymOpts;
+    // If not null, SymbolCollector will collect symbol occurrences.
+    const CollectOccurrenceOptions *OccurrenceOpts;
   };
 
   SymbolCollector(Options Opts);
 
+  ~SymbolCollector();
+
   /// Returns true is \p ND should be collected.
   /// AST matchers require non-const ASTContext.
-  static bool shouldCollectSymbol(const NamedDecl &ND, ASTContext &ASTCtx,
-                                  const Options &Opts);
+  static bool shouldCollectSymbol(const NamedDecl &ND, ASTContext &ASTCtx);
 
   void initialize(ASTContext &Ctx) override;
 
-  void setPreprocessor(std::shared_ptr<Preprocessor> PP) override {
-    this->PP = std::move(PP);
-  }
+  void setPreprocessor(std::shared_ptr<Preprocessor> PP) override;
 
   bool
   handleDeclOccurence(const Decl *D, index::SymbolRoleSet Roles,
@@ -89,25 +103,16 @@ public:
   void finish() override;
 
 private:
-  const Symbol *addDeclaration(const NamedDecl &, SymbolID);
-  void addDefinition(const NamedDecl &, const Symbol &DeclSymbol);
-
-  // All Symbols collected from the AST.
-  SymbolSlab::Builder Symbols;
-  ASTContext *ASTCtx;
-  std::shared_ptr<Preprocessor> PP;
-  std::shared_ptr<GlobalCodeCompletionAllocator> CompletionAllocator;
-  std::unique_ptr<CodeCompletionTUInfo> CompletionTUInfo;
   Options Opts;
-  // Symbols referenced from the current TU, flushed on finish().
-  llvm::DenseSet<const NamedDecl *> ReferencedDecls;
-  llvm::DenseSet<const IdentifierInfo *> ReferencedMacros;
-  // Maps canonical declaration provided by clang to canonical declaration for
-  // an index symbol, if clangd prefers a different declaration than that
-  // provided by clang. For example, friend declaration might be considered
-  // canonical by clang but should not be considered canonical in the index
-  // unless it's a definition.
-  llvm::DenseMap<const Decl *, const Decl *> CanonicalDecls;
+
+  std::shared_ptr<Preprocessor> PP;
+
+  class CollectSymbol;
+  class CollectOccurrence;
+  std::unique_ptr<CollectSymbol> CollectSym;
+  std::unique_ptr<CollectOccurrence> CollectOccur;
+  // All symbols and symbol occurrences collected from the AST.
+  SymbolSlab::Builder Symbols;
 };
 
 } // namespace clangd

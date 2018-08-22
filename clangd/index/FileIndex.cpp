@@ -20,16 +20,18 @@ SymbolSlab indexAST(ASTContext &AST, std::shared_ptr<Preprocessor> PP,
                     llvm::Optional<llvm::ArrayRef<Decl *>> TopLevelDecls,
                     llvm::ArrayRef<std::string> URISchemes) {
   SymbolCollector::Options CollectorOpts;
+  SymbolCollector::Options::CollectSymbolOptions SymbolOpts;
   // FIXME(ioeric): we might also want to collect include headers. We would need
   // to make sure all includes are canonicalized (with CanonicalIncludes), which
   // is not trivial given the current way of collecting symbols: we only have
   // AST at this point, but we also need preprocessor callbacks (e.g.
   // CommentHandler for IWYU pragma) to canonicalize includes.
-  CollectorOpts.CollectIncludePath = false;
-  CollectorOpts.CountReferences = false;
+  SymbolOpts.CollectIncludePath = false;
+  SymbolOpts.CountReferences = false;
   if (!URISchemes.empty())
     CollectorOpts.URISchemes = URISchemes;
-  CollectorOpts.Origin = SymbolOrigin::Dynamic;
+  SymbolOpts.Origin = SymbolOrigin::Dynamic;
+  CollectorOpts.SymOpts = &SymbolOpts;
 
   SymbolCollector Collector(std::move(CollectorOpts));
   Collector.setPreprocessor(PP);
