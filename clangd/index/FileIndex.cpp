@@ -16,6 +16,32 @@
 namespace clang {
 namespace clangd {
 
+SymbolSlab indexMainAST(ParsedAST &AST,
+                        llvm::ArrayRef<std::string> URISchemes) {
+  // Collect references.
+  SymbolCollector::Options::CollectOccurrenceOptions Opts;
+  Opts.Filter = SymbolOccurrenceKind::Declaration |
+                SymbolOccurrenceKind::Definition |
+                SymbolOccurrenceKind::Reference;
+  SymbolCollector::Options CollectorOpts;
+  CollectorOpts.OccurrenceOpts = &Opts;
+
+  if (!URISchemes.empty())
+    CollectorOpts.URISchemes = URISchemes;
+  SymbolCollector Collector(std::move(CollectorOpts));
+  Collector.setPreprocessor(AST.getPreprocessorPtr());
+
+  index::IndexingOptions IndexOpts;
+  // We only need declarations, because we don't count references.
+  IndexOpts.SystemSymbolFilter =
+      index::IndexingOptions::SystemSymbolFilterKind::None;
+  IndexOpts.IndexFunctionLocals = false;
+
+  index::indexTopLevelDecls(AST.getASTContext(), AST.getLocalTopLevelDecls(),
+                            Collector, IndexOpts);
+  return Collector.takeSymbols();
+}
+
 SymbolSlab indexAST(ASTContext &AST, std::shared_ptr<Preprocessor> PP,
                     llvm::Optional<llvm::ArrayRef<Decl *>> TopLevelDecls,
                     llvm::ArrayRef<std::string> URISchemes) {
@@ -87,6 +113,15 @@ std::shared_ptr<std::vector<const Symbol *>> FileSymbols::allSymbols() {
   return {std::move(Snap), Pointers};
 }
 
+std::vector<std::shared_ptr<SymbolSlab>> FileSymbols::allSlabs() const {
+  std::lock_guard<std::mutex> Lock(Mutex);
+
+  std::vector<std::shared_ptr<SymbolSlab>> Slabs;
+  for (const auto &FileAndSlab : FileToSlabs)
+    Slabs.push_back(FileAndSlab.second);
+  return Slabs;
+}
+
 void FileIndex::update(PathRef Path, ASTContext *AST,
                        std::shared_ptr<Preprocessor> PP,
                        llvm::Optional<llvm::ArrayRef<Decl *>> TopLevelDecls) {
@@ -100,6 +135,12 @@ void FileIndex::update(PathRef Path, ASTContext *AST,
   }
   auto Symbols = FSymbols.allSymbols();
   Index.build(std::move(Symbols));
+}
+
+void FileIndex::updateMainAST(PathRef Path, ParsedAST& AST) {
+  auto SlabForMainFile = llvm::make_unique<SymbolSlab>();
+  *SlabForMainFile = indexMainAST(AST, URISchemes);
+  FSymbols.update(Path, std::move(SlabForMainFile));
 }
 
 bool FileIndex::fuzzyFind(
@@ -117,7 +158,15 @@ void FileIndex::lookup(
 void FileIndex::findOccurrences(
     const OccurrencesRequest &Req,
     llvm::function_ref<void(const SymbolOccurrence &)> Callback) const {
-  log("findOccurrences is not implemented.");
+  auto OccurrencesSlabs = FSymbols.allSlabs();
+  for (const auto &Slab : OccurrencesSlabs) {
+  for (const auto &ID : Req.IDs) {
+    for (const auto &Occurrence : Slab->findOccurrences(ID)) {
+      if (static_cast<int>(Req.Filter & Occurrence.Kind))
+        Callback(Occurrence);
+    }
+  }
+}
 }
 
 } // namespace clangd

@@ -48,6 +48,11 @@ SymbolSlab TestTU::headerSymbols() const {
   return indexAST(AST.getASTContext(), AST.getPreprocessorPtr());
 }
 
+SymbolSlab TestTU::mainFileOccurrences() const {
+  auto AST = build();
+  return indexMainAST(AST);
+}
+
 std::unique_ptr<SymbolIndex> TestTU::index() const {
   return MemIndex::build(headerSymbols());
 }

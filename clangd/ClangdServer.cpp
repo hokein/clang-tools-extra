@@ -85,9 +85,9 @@ public:
   }
 
   void onMainAST(PathRef Path, ParsedAST &AST) override {
-
-    MainFileIdx.update(Path, &AST.getASTContext(), AST.getPreprocessorPtr(),
-                       AST.getLocalTopLevelDecls());
+    MainFileIdx.updateMainAST(Path, AST);
+    //MainFileIdx.update(Path, &AST.getASTContext(), AST.getPreprocessorPtr(),
+                       //AST.getLocalTopLevelDecls());
   }
 
 private:

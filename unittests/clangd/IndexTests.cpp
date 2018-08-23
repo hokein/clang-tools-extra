@@ -8,7 +8,10 @@
 //===----------------------------------------------------------------------===//
 
 #include "TestIndex.h"
+#include "TestTU.h"
+#include "Annotations.h"
 #include "index/Index.h"
+#include "index/FileIndex.h"
 #include "index/MemIndex.h"
 #include "index/Merge.h"
 #include "gmock/gmock.h"
@@ -22,6 +25,15 @@ namespace clangd {
 namespace {
 
 MATCHER_P(Named, N, "") { return arg.Name == N; }
+
+MATCHER(OccurrenceRange, "") {
+  const clang::clangd::SymbolOccurrence &Pos = testing::get<0>(arg);
+  const clang::clangd::Range &Range = testing::get<1>(arg);
+  return std::tie(Pos.Location.Start.Line, Pos.Location.Start.Column,
+                  Pos.Location.End.Line, Pos.Location.End.Column) ==
+         std::tie(Range.start.line, Range.start.character, Range.end.line,
+                  Range.end.character);
+}
 
 TEST(SymbolSlab, FindAndIterate) {
   SymbolSlab::Builder B;
@@ -186,6 +198,48 @@ TEST(MergeIndexTest, FuzzyFind) {
   Req.Scopes = {"ns::"};
   EXPECT_THAT(match(*mergeIndex(&I, &J), Req),
               UnorderedElementsAre("ns::A", "ns::B", "ns::C"));
+}
+
+std::vector<Range> operator+(const std::vector<Range> &L,
+                             const std::vector<Range> &R) {
+  std::vector<Range> Result = L;
+  Result.insert(Result.end(), R.begin(), R.end());
+  return Result;
+}
+
+TEST(MergeIndexTest, FindOccurrences) {
+  FileIndex Dyn;
+  FileIndex StaticIndex;
+  auto MergedIndex =  mergeIndex(&Dyn, &StaticIndex);
+
+  auto HeaderSymbols = TestTU::withHeaderCode("class Foo;").headerSymbols();
+  auto Foo = findSymbol(HeaderSymbols, "Foo");
+
+  Annotations Test1Code(R"(class $Foo[[Foo]];)");
+  auto AST = TestTU::withCode(Test1Code.code(), "test.cc").build();
+  Dyn.updateMainAST("test.cc", AST);
+
+  auto StaticAST =
+      TestTU::withCode("// static\nclass Foo {};", "test.cc").build();
+  // Add stale occurrences for test.cc.
+  StaticIndex.updateMainAST("test.cc", StaticAST);
+  // Add occcurrences for test2.cc
+  Annotations Test2Code(R"(class $Foo[[Foo]] {};)");
+  StaticAST = TestTU::withCode(Test2Code.code(), "test2.cc").build();
+  StaticIndex.updateMainAST("test2.cc", StaticAST);
+
+  OccurrencesRequest Request;
+  Request.IDs = {Foo.ID};
+  Request.Filter = SymbolOccurrenceKind::Declaration |
+                   SymbolOccurrenceKind::Definition |
+                   SymbolOccurrenceKind::Reference;
+  std::vector<SymbolOccurrence> Results;
+  MergedIndex->findOccurrences(
+      Request, [&](const SymbolOccurrence &O) { Results.push_back(O); });
+
+  EXPECT_THAT(Results, testing::UnorderedPointwise(
+                           OccurrenceRange(),
+                           Test1Code.ranges("Foo") + Test2Code.ranges("Foo")));
 }
 
 TEST(MergeTest, Merge) {

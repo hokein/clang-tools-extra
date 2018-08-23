@@ -140,7 +140,7 @@ SymbolSlab SymbolSlab::Builder::build() && {
                       Occurrences.end());
 
     for (auto &O : Occurrences)
-      O.Location.FileURI = UniqueStrings.save(O.Location.FileURI);
+      O.Location.FileURI = Strings.save(O.Location.FileURI);
   }
 
   return SymbolSlab(std::move(NewArena), std::move(Symbols),

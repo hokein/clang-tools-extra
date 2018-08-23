@@ -81,7 +81,9 @@ void MemIndex::lookup(const LookupRequest &Req,
 void MemIndex::findOccurrences(
     const OccurrencesRequest &Req,
     llvm::function_ref<void(const SymbolOccurrence &)> Callback) const {
-  log("findOccurrences is not implemented.");
+  assert(
+      true &&
+      "find occurrences is not support in memIndex, and should not be called");
 }
 
 std::shared_ptr<std::vector<const Symbol *>>

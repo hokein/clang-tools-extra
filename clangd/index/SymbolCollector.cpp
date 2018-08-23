@@ -267,6 +267,8 @@ public:
         SymbolOccurrence Occurrence;
         Occurrence.Location = *Location;
         Occurrence.Kind = ToOccurrenceKind(Roles);
+
+        log("add occurrence : {0}", Occurrence);
         Builder->insert(ID, Occurrence);
       }
     };

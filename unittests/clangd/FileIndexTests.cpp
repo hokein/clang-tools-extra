@@ -10,6 +10,7 @@
 #include "ClangdUnit.h"
 #include "TestFS.h"
 #include "TestTU.h"
+#include "Annotations.h"
 #include "index/FileIndex.h"
 #include "clang/Frontend/CompilerInvocation.h"
 #include "clang/Frontend/PCHContainerOperations.h"
@@ -268,6 +269,40 @@ TEST(FileIndexTest, RebuildWithPreamble) {
   EXPECT_THAT(
       match(Index, Req),
       UnorderedElementsAre("ns_in_header", "ns_in_header::func_in_header"));
+}
+
+TEST(FileIndexTest, Occurrences) {
+  TestTU File;
+  Annotations MainCode(R"cpp(
+  #include "foo.h"
+  void f() {
+    $foo[[Foo]] foo;
+  }
+  )cpp");
+  File.Code = MainCode.code();
+  File.HeaderCode = "class Foo {};";
+  File.build();
+
+  auto HeaderSymbols = File.headerSymbols();
+  auto Foo = findSymbol(HeaderSymbols, "Foo");
+
+  OccurrencesRequest Request;
+  Request.IDs = {Foo.ID};
+  Request.Filter = SymbolOccurrenceKind::Declaration |
+                   SymbolOccurrenceKind::Definition |
+                   SymbolOccurrenceKind::Reference;
+
+  FileIndex Index;
+  auto AST = File.build();
+  Index.updateMainAST("test.cc", AST);
+  std::vector<SymbolOccurrence> Results;
+  Index.findOccurrences(Request, [&Results](const SymbolOccurrence& O) {
+    llvm::errs() << "occurrence: " << O;
+    Results.push_back(O);
+  });
+
+  EXPECT_EQ(File.mainFileOccurrences().findOccurrences(Foo.ID),
+            ArrayRef<SymbolOccurrence>(Results));
 }
 
 } // namespace

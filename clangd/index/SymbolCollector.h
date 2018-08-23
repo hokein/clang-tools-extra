@@ -71,9 +71,9 @@ public:
     std::string FallbackDir;
 
     // If not null, SymbolCollector will collect symbols.
-    const CollectSymbolOptions *SymOpts;
+    const CollectSymbolOptions *SymOpts = nullptr;
     // If not null, SymbolCollector will collect symbol occurrences.
-    const CollectOccurrenceOptions *OccurrenceOpts;
+    const CollectOccurrenceOptions *OccurrenceOpts = nullptr;
   };
 
   SymbolCollector(Options Opts);

@@ -81,7 +81,17 @@ class MergedIndex : public SymbolIndex {
   void findOccurrences(const OccurrencesRequest &Req,
                        llvm::function_ref<void(const SymbolOccurrence &)>
                            Callback) const override {
-    log("findOccurrences is not implemented.");
+    llvm::DenseSet<llvm::StringRef> SeenURIs;
+    Dynamic->findOccurrences(Req, [&](const SymbolOccurrence &O) {
+      llvm::errs() << "occurrence: " << O << "\n";
+      SeenURIs.insert(O.Location.FileURI);
+      Callback(O);
+    });
+    Static->findOccurrences(Req, [&](const SymbolOccurrence &O) {
+      llvm::errs() << "occurrence2: " << O << "\n";
+      if (!llvm::is_contained(SeenURIs, O.Location.FileURI))
+        Callback(O);
+    });
   }
 
 private:

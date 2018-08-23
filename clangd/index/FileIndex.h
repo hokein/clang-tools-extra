@@ -46,6 +46,9 @@ public:
   // The shared_ptr keeps the symbols alive
   std::shared_ptr<std::vector<const Symbol *>> allSymbols();
 
+  // \brief Returns all stored symbol slabs.
+  std::vector<std::shared_ptr<SymbolSlab>> allSlabs() const;
+
 private:
   mutable std::mutex Mutex;
 
@@ -69,6 +72,8 @@ public:
   void
   update(PathRef Path, ASTContext *AST, std::shared_ptr<Preprocessor> PP,
          llvm::Optional<llvm::ArrayRef<Decl *>> TopLevelDecls = llvm::None);
+
+  void updateMainAST(PathRef Path, ParsedAST& AST);
 
   bool
   fuzzyFind(const FuzzyFindRequest &Req,
@@ -96,6 +101,10 @@ SymbolSlab
 indexAST(ASTContext &AST, std::shared_ptr<Preprocessor> PP,
          llvm::Optional<llvm::ArrayRef<Decl *>> TopLevelDecls = llvm::None,
          llvm::ArrayRef<std::string> URISchemes = {});
+
+SymbolSlab
+indexMainAST(ParsedAST& AST,
+             llvm::ArrayRef<std::string> URISchemes = {});
 
 } // namespace clangd
 } // namespace clang

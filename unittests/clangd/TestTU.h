@@ -26,8 +26,10 @@ namespace clang {
 namespace clangd {
 
 struct TestTU {
-  static TestTU withCode(llvm::StringRef Code) {
+  static TestTU withCode(llvm::StringRef Code, llvm::StringRef Name = "") {
     TestTU TU;
+    if (!Name.empty())
+      TU.Filename = Name;
     TU.Code = Code;
     return TU;
   }
@@ -51,6 +53,7 @@ struct TestTU {
 
   ParsedAST build() const;
   SymbolSlab headerSymbols() const;
+  SymbolSlab mainFileOccurrences() const;
   std::unique_ptr<SymbolIndex> index() const;
 };
 
