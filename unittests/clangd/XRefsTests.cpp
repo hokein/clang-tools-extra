@@ -620,7 +620,7 @@ TEST(Hover, All) {
             class Foo {};
             F^oo* foo();
           )cpp",
-          "Declared in global namespace\n\nclass Foo {}",
+          "Declared in global namespace\n\nclass Foo",
       },
       {
           R"cpp(// Function declaration
@@ -1128,6 +1128,14 @@ TEST(FindReferences, WithinAST) {
         }
       )cpp",
 
+      R"cpp(// Forward declaration
+        class $foo[[Foo]];
+        class $foo[[Foo]] {}
+        int main() {
+          $foo[[Fo^o]] foo;
+        }
+      )cpp",
+
       R"cpp(// Function
         int $foo[[foo]](int) {}
         int main() {
@@ -1148,11 +1156,11 @@ TEST(FindReferences, WithinAST) {
       )cpp",
 
       R"cpp(// Method call
-        struct Foo { int [[foo]](); };
-        int Foo::[[foo]]() {}
+        struct Foo { int $foo[[foo]](); };
+        int Foo::$foo[[foo]]() {}
         int main() {
           Foo f;
-          f.^foo();
+          f.$foo[[^foo]]();
         }
       )cpp",
 

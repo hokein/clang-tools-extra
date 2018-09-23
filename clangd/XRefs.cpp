@@ -70,7 +70,7 @@ struct MacroDecl {
 };
 
 struct DeclInfo {
-  const Decl *D;
+  const Decl *CanonicalD;
   // Indicates the declaration is referenced by an explicit AST node.
   bool IsReferencedExplicitly = false;
 };
@@ -82,7 +82,7 @@ class DeclarationAndMacrosFinder : public index::IndexDataConsumer {
   // explicitly in the code.
   // True means the declaration is explicitly referenced at least once; false
   // otherwise.
-  llvm::DenseMap<const Decl *, bool> Decls;
+  llvm::DenseMap<const Decl *, bool> CanonicalDecls;
   const SourceLocation &SearchedLocation;
   const ASTContext &AST;
   Preprocessor &PP;
@@ -97,9 +97,9 @@ public:
   // location.
   std::vector<DeclInfo> getFoundDecls() const {
     std::vector<DeclInfo> Result;
-    for (auto It : Decls) {
+    for (auto It : CanonicalDecls) {
       Result.emplace_back();
-      Result.back().D = It.first;
+      Result.back().CanonicalD = It.first;
       Result.back().IsReferencedExplicitly = It.second;
     }
 
@@ -108,7 +108,7 @@ public:
               [](const DeclInfo &L, const DeclInfo &R) {
                 if (L.IsReferencedExplicitly != R.IsReferencedExplicitly)
                   return L.IsReferencedExplicitly > R.IsReferencedExplicitly;
-                return L.D->getBeginLoc() < R.D->getBeginLoc();
+                return L.CanonicalD->getBeginLoc() < R.CanonicalD->getBeginLoc();
               });
     return Result;
   }
@@ -133,6 +133,7 @@ public:
                       ArrayRef<index::SymbolRelation> Relations,
                       SourceLocation Loc,
                       index::IndexDataConsumer::ASTNodeInfo ASTNode) override {
+    assert(D->isCanonicalDecl() && "expect D to be a canonical declaration");
     if (Loc == SearchedLocation) {
       // Check whether the E has an implicit AST node (e.g. ImplicitCastExpr).
       auto hasImplicitExpr = [](const Expr *E) {
@@ -149,16 +150,7 @@ public:
       };
 
       bool IsExplicit = !hasImplicitExpr(ASTNode.OrigE);
-      // Find and add definition declarations (for GoToDefinition).
-      // We don't use parameter `D`, as Parameter `D` is the canonical
-      // declaration, which is the first declaration of a redeclarable
-      // declaration, and it could be a forward declaration.
-      if (const auto *Def = getDefinition(D)) {
-        Decls[Def] |= IsExplicit;
-      } else {
-        // Couldn't find a definition, fall back to use `D`.
-        Decls[D] |= IsExplicit;
-      }
+      CanonicalDecls[D] |= IsExplicit;
     }
     return true;
   }
@@ -187,7 +179,7 @@ private:
         MacroInfo *MacroInf = MacroDef.getMacroInfo();
         if (MacroInf) {
           MacroInfos.push_back(MacroDecl{IdentifierInfo->getName(), MacroInf});
-          assert(Decls.empty());
+          assert(CanonicalDecls.empty());
         }
       }
     }
@@ -293,7 +285,7 @@ std::vector<Location> findDefinitions(ParsedAST &AST, Position Pos,
 
   // Emit all symbol locations (declaration or definition) from AST.
   for (const DeclInfo &DI : Symbols.Decls) {
-    const Decl *D = DI.D;
+    const Decl *D = DI.CanonicalD;
     // Fake key for symbols don't have USR (no SymbolID).
     // Ideally, there should be a USR for each identified symbols. Symbols
     // without USR are rare and unimportant cases, we use the a fake holder to
@@ -307,16 +299,10 @@ std::vector<Location> findDefinitions(ParsedAST &AST, Position Pos,
       ResultCandidates.emplace_back();
     auto &Candidate = ResultCandidates[R.first->second];
 
-    auto Loc = findNameLoc(D);
-    auto L = makeLocation(AST, Loc);
-    // The declaration in the identified symbols is a definition if possible
-    // otherwise it is declaration.
-    bool IsDef = getDefinition(D) == D;
-    // Populate one of the slots with location for the AST.
-    if (!IsDef)
-      Candidate.Decl = L;
+    if (const auto* Def = getDefinition(D))
+      Candidate.Def = makeLocation(AST, findNameLoc(Def));
     else
-      Candidate.Def = L;
+      Candidate.Decl = makeLocation(AST, findNameLoc(D));
   }
 
   if (Index) {
@@ -361,29 +347,28 @@ namespace {
 class ReferenceFinder : public index::IndexDataConsumer {
 public:
   struct Reference {
-    const Decl *Target;
+    const Decl *TargetCanonicalDecl;
     SourceLocation Loc;
     index::SymbolRoleSet Role;
   };
 
   ReferenceFinder(ASTContext &AST, Preprocessor &PP,
-                  const std::vector<const Decl *> &TargetDecls)
+                  const std::vector<const Decl *> &CanonicalDecls)
       : AST(AST) {
-    for (const Decl *D : TargetDecls)
-      Targets.insert(D);
+    TargetCanonicalDecls.insert(CanonicalDecls.begin(), CanonicalDecls.end());
   }
 
   std::vector<Reference> take() && {
     std::sort(References.begin(), References.end(),
               [](const Reference &L, const Reference &R) {
-                return std::tie(L.Loc, L.Target, L.Role) <
-                       std::tie(R.Loc, R.Target, R.Role);
+                return std::tie(L.Loc, L.TargetCanonicalDecl, L.Role) <
+                       std::tie(R.Loc, R.TargetCanonicalDecl, R.Role);
               });
     // We sometimes see duplicates when parts of the AST get traversed twice.
     References.erase(std::unique(References.begin(), References.end(),
                                  [](const Reference &L, const Reference &R) {
-                                   return std::tie(L.Target, L.Loc, L.Role) ==
-                                          std::tie(R.Target, R.Loc, R.Role);
+                                   return std::tie(L.TargetCanonicalDecl, L.Loc, L.Role) ==
+                                          std::tie(R.TargetCanonicalDecl, R.Loc, R.Role);
                                  }),
                      References.end());
     return std::move(References);
@@ -396,13 +381,13 @@ public:
                       index::IndexDataConsumer::ASTNodeInfo ASTNode) override {
     const SourceManager &SM = AST.getSourceManager();
     Loc = SM.getFileLoc(Loc);
-    if (SM.isWrittenInMainFile(Loc) && Targets.count(D))
+    if (SM.isWrittenInMainFile(Loc) && TargetCanonicalDecls.count(D))
       References.push_back({D, Loc, Roles});
     return true;
   }
 
 private:
-  llvm::SmallSet<const Decl *, 4> Targets;
+  llvm::SmallSet<const Decl *, 4> TargetCanonicalDecls;
   std::vector<Reference> References;
   const ASTContext &AST;
 };
@@ -428,7 +413,7 @@ std::vector<DocumentHighlight> findDocumentHighlights(ParsedAST &AST,
       AST, getBeginningOfIdentifier(AST, Pos, SM.getMainFileID()));
   std::vector<const Decl *> TargetDecls;
   for (const DeclInfo &DI : Symbols.Decls) {
-    TargetDecls.push_back(DI.D);
+    TargetDecls.push_back(DI.CanonicalD);
   }
   auto References = findRefs(TargetDecls, AST);
 
@@ -697,7 +682,7 @@ Optional<Hover> getHover(ParsedAST &AST, Position Pos) {
     return getHoverContents(Symbols.Macros[0].Name);
 
   if (!Symbols.Decls.empty())
-    return getHoverContents(Symbols.Decls[0].D);
+    return getHoverContents(Symbols.Decls[0].CanonicalD);
 
   auto DeducedType = getDeducedType(AST, SourceLocationBeg);
   if (DeducedType && !DeducedType->isNull())
@@ -721,7 +706,7 @@ std::vector<Location> findReferences(ParsedAST &AST, Position Pos,
   std::vector<const Decl *> TargetDecls;
   for (const DeclInfo &DI : Symbols.Decls) {
     if (DI.IsReferencedExplicitly)
-      TargetDecls.push_back(DI.D);
+      TargetDecls.push_back(DI.CanonicalD);
   }
 
   // We traverse the AST to find references in the main file.
