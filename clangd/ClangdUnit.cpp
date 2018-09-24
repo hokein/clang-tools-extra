@@ -398,9 +398,19 @@ SourceLocation clangd::getBeginningOfIdentifier(ParsedAST &Unit,
   SourceLocation Before =
       SourceMgr.getMacroArgExpandedLocation(InputLoc.getLocWithOffset(-1));
   Before = Lexer::GetBeginningOfToken(Before, SourceMgr, AST.getLangOpts());
+  llvm::errs() << "before loc\n";
+  Before.dump(SourceMgr);
+  llvm::errs() << Before.isFileID() << " file id \n";
   Token Tok;
+  // If Pos is inside a macro argument, getRawToken will return token of the
+  // macro name, but we do want the token of the macro argument. To achieve it,
+  // we pass a spelling location to getRawToken.
+  //  MACRO(foo->func^tion())
+  //  ^~~~~ expansion location
+  //             ^~~~~~~~~ spelling location
   if (Before.isValid() &&
-      !Lexer::getRawToken(Before, Tok, SourceMgr, AST.getLangOpts(), false) &&
+      !Lexer::getRawToken(SourceMgr.getSpellingLoc(Before), Tok, SourceMgr,
+                          AST.getLangOpts(), false) &&
       Tok.is(tok::raw_identifier))
     return Before;                                        // Case 2.
   return SourceMgr.getMacroArgExpandedLocation(InputLoc); // Case 1 or 3.

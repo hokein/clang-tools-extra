@@ -199,6 +199,11 @@ main.cpp:2:3: error: something terrible happened)");
 }
 
 TEST(ClangdUnitTest, GetBeginningOfIdentifier) {
+  const char* HeaderCode = R"cpp(
+    struct Foo { int func(); };
+    #define MACRO(X) void func() { X; }
+    Foo* foo;
+  )cpp";
   // First ^ is the expected beginning, last is the search position.
   for (const char *Text : {
            "int ^f^oo();", // inside identifier
@@ -208,14 +213,28 @@ TEST(ClangdUnitTest, GetBeginningOfIdentifier) {
            "^int foo();",  // beginning of file (can't back up)
            "int ^f0^0();", // after a digit (lexing at N-1 is wrong)
            "int ^λλ^λ();", // UTF-8 handled properly when backing up
+
+           // testcases where identifier is in macro.
+           "MACRO(foo->^func())", // beginning of identifier
+           "MACRO(foo->^fun^c())", // inside identifier
+           "MACRO(foo->^func^())", // end of identifier
+           "MACRO(^foo->func())", // begin identifier
+           "MACRO(^foo^->func())", // end identifier
+           "^MACRO(foo->funct())", // beginning of macro name
+           "^MAC^RO(foo->funct())", // inside macro name
+           "^MACRO^(foo->funct())", // end of macro name
        }) {
     Annotations TestCase(Text);
-    auto AST = TestTU::withCode(TestCase.code()).build();
+    TestTU TU;
+    TU.HeaderCode = HeaderCode;
+    TU.Code = TestCase.code();
+    auto AST = TU.build();
     const auto &SourceMgr = AST.getASTContext().getSourceManager();
     SourceLocation Actual = getBeginningOfIdentifier(
         AST, TestCase.points().back(), SourceMgr.getMainFileID());
-    Position ActualPos =
-        offsetToPosition(TestCase.code(), SourceMgr.getFileOffset(Actual));
+    Position ActualPos = offsetToPosition(
+        TestCase.code(),
+        SourceMgr.getFileOffset(SourceMgr.getSpellingLoc(Actual)));
     EXPECT_EQ(TestCase.points().front(), ActualPos) << Text;
   }
 }
