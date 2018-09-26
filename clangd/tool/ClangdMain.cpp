@@ -176,8 +176,24 @@ static llvm::cl::opt<bool> EnableFunctionArgSnippets(
                    "placeholders for method parameters."),
     llvm::cl::init(clangd::CodeCompleteOptions().EnableFunctionArgSnippets));
 
+// A signal handler that prints stack trace when an abort/kill signal is
+// delivered to the process.
+// This is not **signal-safe**. Technically it can not be totally signal-safe (
+// as llvm::errs() is non-reentrant). This handler is executed when clangd
+// is crashed and we don't expect clangd to continue executing, so we do
+// best-effort on emitting the stack trace to standard error.
+static void PrintStackTraceSignalHandler(void *) {
+  // We don't use clangd::Logger (which uses llvm::errs()) because Logger
+  // requires a lock when emitting a message, which may be introduce a deadlock
+  // in the handler.
+  llvm::sys::PrintStackTrace(llvm::errs());
+  // Flush the error stream immediately, as we set it to buffered.
+  llvm::errs().flush();
+}
+
 int main(int argc, char *argv[]) {
-  llvm::sys::PrintStackTraceOnErrorSignal(argv[0]);
+  // Print stack trace when an abort/kill signal is delievered to clangd.
+  llvm::sys::AddSignalHandler(PrintStackTraceSignalHandler, nullptr);
   llvm::cl::SetVersionPrinter([](llvm::raw_ostream &OS) {
     OS << clang::getClangToolFullVersion("clangd") << "\n";
   });
