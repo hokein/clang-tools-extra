@@ -40,6 +40,7 @@ set(CLANG_TOOLS_TEST_DEPS
   # For the clang-doc tests that emit bitcode files.
   llvm-bcanalyzer
 
+  clang-headers
   # Individual tools we test.
   clang-apply-replacements
   clang-change-namespace
@@ -73,16 +74,18 @@ if(CLANG_ENABLE_STATIC_ANALYZER)
     )
 endif()
 
-set(llvm_utils
-  FileCheck count not
-  )
+macro(add_llvm_utils_deps deps)
+  set(llvm_utils
+      FileCheck count not
+      )
+  foreach(t ${llvm_utils})
+    if(TARGET ${t})
+      list(APPEND "${deps}" ${t})
+    endif()
+  endforeach()
+endmacro()
 
-foreach(t ${llvm_utils})
-  if(TARGET ${t})
-    list(APPEND CLANG_TOOLS_TEST_DEPS ${t})
-  endif()
-endforeach()
-
+add_llvm_utils_deps(CLANG_TOOLS_TEST_DEPS)
 add_lit_testsuite(check-clang-tools "Running the Clang extra tools' regression tests"
   ${CMAKE_CURRENT_BINARY_DIR}
   DEPENDS ${CLANG_TOOLS_TEST_DEPS}
@@ -90,3 +93,19 @@ add_lit_testsuite(check-clang-tools "Running the Clang extra tools' regression t
   )
 
 set_target_properties(check-clang-tools PROPERTIES FOLDER "Clang extra tools' tests")
+
+# Setup an individual test for building and testing clangd-related stuff.
+set(CLANGD_TEST_DEPS
+  clangd
+  ClangdTests
+  # clangd-related tools which don't have tests, add them to the test to make
+  # sure we don't introduce new changes that break their compilations.
+  clangd-indexer
+  dexp
+)
+add_llvm_utils_deps(CLANGD_TEST_DEPS)
+add_lit_testsuite(check-clangd "Running the Clangd regression tests"
+  ${CMAKE_CURRENT_BINARY_DIR}/Unit/clangd;${CMAKE_CURRENT_BINARY_DIR}/clangd
+  DEPENDS ${CLANGD_TEST_DEPS}
+)
+set_target_properties(check-clangd PROPERTIES FOLDER "Clangd tests")
