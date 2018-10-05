@@ -1220,6 +1220,39 @@ TEST(FindReferences, NeedsIndex) {
               ElementsAre(RangeIs(Main.range())));
 }
 
+TEST(FindReferences, NoImplicitSymbols) {
+  auto T = Annotations(R"cpp(
+    struct $foo[[Foo]] {
+      $foo[[Foo]]();
+      $foo[[Foo]]($foo[[Foo]]&&);
+      $foo[[Foo]](const char*);
+    };
+
+    $foo[[Foo]] $f[[f]]();
+
+    void $g[[g]]($foo[[Foo]] foo);
+
+    void call() {
+      const char* $str[[str]] = "123";
+      $foo[[$foo^Foo]] $a[[$a^a]] = $str[[$str^str]];
+      $foo[[Foo]] $b[[$b^b]] = $foo[[Foo]]($str[[str]]);
+      $foo[[Foo]] $c[[$c^c]] = $f[[$f^f]]();
+      $g[[$g^g]]($f[[f]]());
+      $g[[g]]($str[[str]]);
+    }
+  )cpp");
+  StringRef CommonCode = R"cpp(
+    
+  )cpp";
+  auto AST = TestTU::withCode(T.code()).build();
+  for (const auto& Name : {"str", "a", "b", "c", "g", "f", "foo"}) {
+    std::vector<Matcher<Location>> ExpectedLocations;
+    for (const auto &R : T.ranges(Name))
+      ExpectedLocations.push_back(RangeIs(R));
+    EXPECT_THAT(findReferences(AST, T.point(Name)),
+                UnorderedElementsAreArray(ExpectedLocations));
+  }
+}
 TEST(FindReferences, NoQueryForLocalSymbols) {
   struct RecordingIndex : public MemIndex {
     mutable Optional<DenseSet<SymbolID>> RefIDs;
