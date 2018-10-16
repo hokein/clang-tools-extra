@@ -120,7 +120,8 @@ void MakeSmartPtrCheck::check(const MatchFinder::MatchResult &Result) {
 
   if (New->getNumPlacementArgs() != 0)
     return;
-
+  if (New->isArray() && !New->hasInitializer())
+    return;
   if (Construct)
     checkConstruct(SM, Result.Context, Construct, Type, New);
   else if (Reset)
