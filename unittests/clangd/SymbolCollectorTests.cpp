@@ -434,6 +434,50 @@ o]]();
           ));
 }
 
+TEST_F(SymbolCollectorTest, NoImplicitRefs) {
+  CollectorOpts.RefFilter = RefKind::All;
+  CollectorOpts.RefsInHeaders = false;
+  const std::string Header(R"(
+    struct Foo {
+      Foo(int) {}
+    };
+    struct Bar {
+      Bar(const char*) {}
+    };
+
+    const int INT = 10;
+  )");
+  Annotations Main(R"(
+    $foo[[Foo]] f() {
+      $foo[[Foo]] foo = 123;
+      return 1;
+      return $INT[[INT]];
+    }
+
+    $foo[[Foo]] foo = 1; // no Foo constructor ref collect here.
+
+    Bar f2() {
+       const char* str;
+       // Implicit call Bar constructor, no refs collected.
+       return str;
+       return "abc";
+       // Explicit call Bar consturctor.
+       return $barctor[[Bar]](str);
+    }
+  )");
+  runSymbolCollector(Header, Main.code());
+
+  EXPECT_THAT(Refs, Contains(Pair(findSymbol(Symbols, "Foo").ID,
+                                  HaveRanges(Main.ranges("foo")))));
+  EXPECT_THAT(Refs, Contains(Pair(findSymbol(Symbols, "INT").ID,
+                                  HaveRanges(Main.ranges("INT")))));
+  EXPECT_THAT(Refs, Contains(Pair(findSymbol(Symbols, "Bar::Bar").ID,
+                                  HaveRanges(Main.ranges("barctor")))));
+  // We don't have refs collected for Foo constructor as the main code doesn't
+  // call it explicitly.
+  EXPECT_THAT(Refs, Not(Contains(Pair(findSymbol(Symbols, "Foo::Foo").ID, _))));
+}
+
 TEST_F(SymbolCollectorTest, Refs) {
   Annotations Header(R"(
   class $foo[[Foo]] {
