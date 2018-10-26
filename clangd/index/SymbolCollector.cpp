@@ -9,6 +9,7 @@
 
 #include "SymbolCollector.h"
 #include "AST.h"
+#include "clang/AST/ExprCXX.h"
 #include "CanonicalIncludes.h"
 #include "CodeComplete.h"
 #include "CodeCompletionStrings.h"
@@ -28,6 +29,7 @@
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
+#include "clang/AST/RecursiveASTVisitor.h"
 
 using namespace llvm;
 namespace clang {
@@ -253,8 +255,10 @@ SymbolCollector::SymbolCollector(Options Opts) : Opts(std::move(Opts)) {}
 void SymbolCollector::initialize(ASTContext &Ctx) {
   ASTCtx = &Ctx;
   CompletionAllocator = std::make_shared<GlobalCodeCompletionAllocator>();
+ 
   CompletionTUInfo =
       llvm::make_unique<CodeCompletionTUInfo>(CompletionAllocator);
+      
 }
 
 bool SymbolCollector::shouldCollectSymbol(const NamedDecl &ND,
@@ -276,7 +280,7 @@ bool SymbolCollector::shouldCollectSymbol(const NamedDecl &ND,
   // violations.
   if (ND.isInAnonymousNamespace())
     return false;
-
+  
   // We want most things but not "local" symbols such as symbols inside
   // FunctionDecl, BlockDecl, ObjCMethodDecl and OMPDeclareReductionDecl.
   // FIXME: Need a matcher for ExportDecl in order to include symbols declared
@@ -308,11 +312,32 @@ bool SymbolCollector::shouldCollectSymbol(const NamedDecl &ND,
   // Skip decls in the main file.
   if (SM.isInMainFile(SM.getExpansionLoc(ND.getBeginLoc())))
     return false;
+  auto EL = SM.getExpansionLoc(ND.getBeginLoc());
+
   // Avoid indexing internal symbols in protobuf generated headers.
   if (isPrivateProtoDecl(ND))
     return false;
   return true;
 }
+
+class ParentExprFinder : public RecursiveASTVisitor<ParentExprFinder> {
+  public:
+   ParentExprFinder(const Stmt* Target) : TargetedStmt(Target) {
+   }
+   const Stmt* getResult() const {
+     return Parent;
+   }
+   bool VisitStmt(Stmt *S) {
+     if (S == TargetedStmt) {
+       return false;
+     }
+     Parent = S;
+     return true;
+   }
+  private:
+   const Stmt* Parent = nullptr;
+   const Stmt* TargetedStmt;
+};
 
 // Always return true to continue indexing.
 bool SymbolCollector::handleDeclOccurence(
@@ -338,14 +363,41 @@ bool SymbolCollector::handleDeclOccurence(
   if (!ND)
     return true;
 
-  // Mark D as referenced if this is a reference coming from the main file.
-  // D may not be an interesting symbol, but it's cheaper to check at the end.
-  auto &SM = ASTCtx->getSourceManager();
+  // if (Roles & (static_cast<unsigned>(index::SymbolRole::Implicit))) 
+  // {
+  //   return true;
+  // }
+
+  // // Mark D as referenced if this is a reference coming from the main file.
+  // // D may not be an interesting symbol, but it's cheaper to check at the end.
+    auto &SM = ASTCtx->getSourceManager();
+  // Loc.dump(SM);
+  // D->dump();
+  // llvm::errs() << "--------------\n";
+
+  // auto FID = SM.getFileID(SM.getExpansionLoc(ND->getBeginLoc()));
+  // //SM.getExpansionLoc(ND->getBeginLoc()).dump(SM);
+  // // PP.
+
+  // if (FID.isValid()) {
+  //   auto It = IncludeFiles.find(FID);
+  //   if (It == IncludeFiles.end() || !It->second)
+  //     return true;
+  // }
+  // if (It != IncludeFiles.end()) {
+  //   if (!It->second)
+  //     return true;
+  // }
+  
   auto SpellingLoc = SM.getSpellingLoc(Loc);
+  // SpellingLoc.dump(SM);
+  // llvm::errs() << "!!!!!!!!!!!!!!!\n";
   if (Opts.CountReferences &&
       (Roles & static_cast<unsigned>(index::SymbolRole::Reference)) &&
-      SM.getFileID(SpellingLoc) == SM.getMainFileID())
+      SM.getFileID(SpellingLoc) == SM.getMainFileID()) {
+   
     ReferencedDecls.insert(ND);
+  }
 
   bool CollectRef = static_cast<unsigned>(Opts.RefFilter) & Roles;
   bool IsOnlyRef =
@@ -357,8 +409,44 @@ bool SymbolCollector::handleDeclOccurence(
   if (!shouldCollectSymbol(*ND, *ASTCtx, Opts))
     return true;
   if (CollectRef &&
-      (Opts.RefsInHeaders || SM.getFileID(SpellingLoc) == SM.getMainFileID()))
+      (Opts.RefsInHeaders || SM.getFileID(SpellingLoc) == SM.getMainFileID())) {
+     if (auto* E = ASTNode.OrigE) {
+       if (auto* P = ASTNode.Parent) {
+         ParentExprFinder Finder(E);
+         Finder.TraverseStmt(P->getBody());
+         const auto* ParentNode = Finder.getResult();
+         if (const auto* ICE = dyn_cast_or_null<ImplicitCastExpr>(ParentNode)) {
+           llvm::errs() << "dump written\n";
+           ICE->getSubExprAsWritten()->dump();
+           // clang could warp an implicitCastExpr even expresion is written.
+           if (ICE->getSubExprAsWritten() != E)
+            return true;
+           //return true;
+         }
+
+        //  if (isa<ExprWithCleanups>(P) ||
+        //        isa<MaterializeTemporaryExpr>(P) ||
+        //        isa<CXXBindTemporaryExpr>(p_e) ||
+        //        isa<ImplicitCastExpr>(p_e))
+        //        return true;
+       }
+      //  llvm::errs() << "dump E:\n";
+      //  E->dump();
+      // for (const auto& parent : ASTCtx->getParents(*E)) {
+      //   const Expr* p_e = parent.get<Expr>();
+      //   if (p_e) {
+      //     p_e->dump();
+      //     // llvm::errs() << "!!parent!!\n";
+      //      if (isa<ExprWithCleanups>(p_e) ||
+      //          isa<MaterializeTemporaryExpr>(p_e) ||
+      //          isa<CXXBindTemporaryExpr>(p_e) ||
+      //          isa<ImplicitCastExpr>(p_e))
+      //          return true;
+      //   }
+      // }
+    }
     DeclRefs[ND].emplace_back(SpellingLoc, Roles);
+  }
   // Don't continue indexing if this is a mere reference.
   if (IsOnlyRef)
     return true;
@@ -394,6 +482,14 @@ bool SymbolCollector::handleMacroOccurence(const IdentifierInfo *Name,
   const auto &SM = PP->getSourceManager();
   if (SM.isInMainFile(SM.getExpansionLoc(MI->getDefinitionLoc())))
     return true;
+  //if (FID.isValid()) {
+ // this->IncludeFiles[FID] |= MI->isUsedForHeaderGuard();
+  // MI->dump();
+  // llvm::errs() << MI->isUsedForHeaderGuard() << "!\n";
+  
+  // /}
+  // log("dump!");
+  // MI->dump();
   // Header guards are not interesting in index. Builtin macros don't have
   // useful locations and are not needed for code completions.
   if (MI->isUsedForHeaderGuard() || MI->isBuiltinMacro())
@@ -454,6 +550,28 @@ bool SymbolCollector::handleMacroOccurence(const IdentifierInfo *Name,
 }
 
 void SymbolCollector::finish() {
+    if (IncludeFiles.empty()) {
+       const auto &SM = ASTCtx->getSourceManager();
+    for (auto &IT : PP->macros()) {
+      auto MI = PP->getMacroInfo(IT.first);
+      if (!MI)
+        continue;
+      if (MI->isBuiltinMacro())
+        continue;
+      auto FID = SM.getFileID(MI->getDefinitionLoc());
+      if (FID.isValid()) {
+        if (MI->isUsedForHeaderGuard()) {
+        this->IncludeFiles[FID] = 1;
+        }
+        if (auto *Entry = SM.getFileEntryForID(FID)) {
+          // if (MI->isUsedForHeaderGuard())
+          // llvm::errs() << IT.first->getName() << "  " << Entry->getName() << " "
+          //              << MI->isUsedForHeaderGuard() << "\n";
+        }
+      }
+    }
+  }
+
   // At the end of the TU, add 1 to the refcount of all referenced symbols.
   auto IncRef = [this](const SymbolID &ID) {
     if (const auto *S = Symbols.find(ID)) {
@@ -501,6 +619,15 @@ void SymbolCollector::finish() {
   if (auto MainFileURI = GetURI(SM.getMainFileID())) {
     for (const auto &It : DeclRefs) {
       if (auto ID = getSymbolID(It.first)) {
+        auto FID = SM.getFileID(SM.getExpansionLoc(It.first->getBeginLoc()));
+        // llvm::errs() << "123\n";
+        // if (auto *Entry = SM.getFileEntryForID(FID)) {
+        //   if (Entry->getName().endswith(".inc"))
+        //     continue;
+        //   //llvm::errs() << Entry->getName() << "\n";
+        // }
+        // if (FID.isValid() && !IncludeFiles.count(FID))
+        //   continue;
         for (const auto &LocAndRole : It.second) {
           auto FileID = SM.getFileID(LocAndRole.first);
           if (auto FileURI = GetURI(FileID)) {

@@ -434,6 +434,48 @@ o]]();
           ));
 }
 
+TEST_F(SymbolCollectorTest, NoImplicitRefs) {
+  CollectorOpts.RefFilter = RefKind::All;
+  // CollectorOpts.RefsInHeaders = true;
+  Annotations Header(R"(
+    struct $foo[[Foo]] {
+      $foo[[Foo]](int) {}
+    };
+    struct Bar {
+      $bar[[Bar]](const char*) {}
+    };
+
+    const int $INT[[INT]] = 10;
+  )");
+  Annotations Main(R"(
+    $foo[[Foo]] f() {
+      return 1;
+      return $INT[[INT]];
+    }
+
+    $bar[[Bar]] f2() {
+       const char* str;
+       // Implicit call Bar constructor.
+       return str;
+       return "abc";
+       // Explicit call Bar consturctor.
+       return $barctor[[Bar]](str);
+    }
+  )");
+  runSymbolCollector(Header.code(), Main.code());
+  //llvm::errs() << findSymbol(Symbols, "Foo::Foo").ID << "\n";
+
+
+  EXPECT_THAT(Refs, Contains(Pair(findSymbol(Symbols, "Foo").ID,
+                                  HaveRanges(Main.ranges("foo")))));
+  EXPECT_THAT(Refs, Contains(Pair(findSymbol(Symbols, "INT").ID,
+                                  HaveRanges(Main.ranges("INT")))));
+  EXPECT_THAT(Refs, Contains(Pair(findSymbol(Symbols, "Bar::Bar").ID,
+                                  HaveRanges(Main.ranges("barctor")))));
+   EXPECT_THAT(Refs, Contains(Pair(findSymbol(Symbols, "Bar").ID,
+                                  HaveRanges(Main.ranges("bar")))));
+}
+
 TEST_F(SymbolCollectorTest, Refs) {
   Annotations Header(R"(
   class $foo[[Foo]] {

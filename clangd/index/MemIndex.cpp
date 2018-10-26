@@ -12,6 +12,7 @@
 #include "Logger.h"
 #include "Quality.h"
 #include "Trace.h"
+#include "llvm/ADT/StringSet.h"
 
 using namespace llvm;
 namespace clang {
@@ -20,6 +21,54 @@ namespace clangd {
 std::unique_ptr<SymbolIndex> MemIndex::build(SymbolSlab Slab, RefSlab Refs) {
   // Store Slab size before it is moved.
   const auto BackingDataSize = Slab.bytes() + Refs.bytes();
+  llvm::StringMap<int> FileToRefs;
+
+  for (auto Ref : Refs) {
+    for (auto R : Ref.second) {
+      if (FileToRefs.count(R.Location.FileURI.str()))
+        ++FileToRefs[R.Location.FileURI.str()];
+      else {
+        FileToRefs[R.Location.FileURI.str()] = 1;
+      }
+    }
+  }
+
+  std::vector<std::pair<int, std::string>> AllRefs;
+  std::map<int, int> NumRefsToNumFiles;
+  for (auto& it : FileToRefs) {
+    AllRefs.push_back(std::make_pair(it.second, it.first()));
+    NumRefsToNumFiles[it.second]++;
+  }
+  llvm::sort(AllRefs);
+  int gen_refs = 0;
+  int normal_refs = 0;
+  int normal_files = 0;
+  llvm::StringSet<> V;
+  for (auto& R : AllRefs) {
+    if (V.count(R.second)) {
+      log("find visited file: {0}\n", R.second);
+    }
+    V.insert(R.second);
+    llvm::errs() << R.first << "          " << R.second << "\n";
+    if (llvm::StringRef(R.second).contains("/build/") 
+       && llvm::StringRef(R.second).contains(".inc")) {
+      gen_refs += R.first;
+    } else {
+      normal_refs += R.first;
+      //log("{0}       {1}", R.first, R.second);
+      ++normal_files;
+    }
+  }
+  
+  for (const auto& It: NumRefsToNumFiles) {
+    //log("{0},{1}", It.first, It.second);
+  }
+  log("sizeof(Ref) = {0}", sizeof(Ref));
+  log("number of generated refs: {0}", gen_refs);
+  log("number of normal refs: {0}", normal_refs);
+  log("memory size of refs {0} bytes", Refs.bytes());
+  log("number of normal files: {0}", normal_files);
+  log("number of all files: {0}", FileToRefs.size());
   auto Data = std::make_pair(std::move(Slab), std::move(Refs));
   return llvm::make_unique<MemIndex>(Data.first, Data.second, std::move(Data),
                                      BackingDataSize);

@@ -125,6 +125,7 @@ private:
   // canonical by clang but should not be considered canonical in the index
   // unless it's a definition.
   llvm::DenseMap<const Decl *, const Decl *> CanonicalDecls;
+  llvm::DenseMap<FileID, bool> IncludeFiles;
 };
 
 } // namespace clangd
