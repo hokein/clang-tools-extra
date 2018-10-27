@@ -475,8 +475,15 @@ void SymbolCollector::finish() {
           IncRef(*ID);
     }
   }
-
   const auto &SM = ASTCtx->getSourceManager();
+  llvm::DenseSet<FileID> RegularHeaders;
+  for (auto &IT : PP->macros()) {
+    auto MI = PP->getMacroInfo(IT.first);
+    if (MI && MI->isUsedForHeaderGuard()) {
+      auto FID = SM.getFileID(MI->getDefinitionLoc());
+      RegularHeaders.insert(FID);
+    }
+  }
   DenseMap<FileID, std::string> URICache;
   auto GetURI = [&](FileID FID) -> Optional<std::string> {
     auto Found = URICache.find(FID);
@@ -503,6 +510,9 @@ void SymbolCollector::finish() {
       if (auto ID = getSymbolID(It.first)) {
         for (const auto &LocAndRole : It.second) {
           auto FileID = SM.getFileID(LocAndRole.first);
+          // Only collect refs from the main file and regular headers.
+          if (FileID != SM.getMainFileID() && !RegularHeaders.count(FileID))
+            continue;
           if (auto FileURI = GetURI(FileID)) {
             auto Range =
                 getTokenRange(LocAndRole.first, SM, ASTCtx->getLangOpts());

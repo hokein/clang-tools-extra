@@ -486,11 +486,27 @@ TEST_F(SymbolCollectorTest, RefsInHeaders) {
   CollectorOpts.RefFilter = RefKind::All;
   CollectorOpts.RefsInHeaders = true;
   Annotations Header(R"(
+  #ifndef HEAD_H_
+  #define HEAD_H_
   class [[Foo]] {};
+  #endif
   )");
   runSymbolCollector(Header.code(), "");
   EXPECT_THAT(Refs, Contains(Pair(findSymbol(Symbols, "Foo").ID,
                                   HaveRanges(Header.ranges()))));
+}
+
+TEST_F(SymbolCollectorTest, NoRefsInNonRegularHeaders) {
+  CollectorOpts.RefFilter = RefKind::All;
+  CollectorOpts.RefsInHeaders = true;
+  Annotations Header(R"(
+  class [[Foo]] {};
+  inline void f() {
+    [[Foo]] foo;
+  }
+  )");
+  runSymbolCollector(Header.code(), "");
+  EXPECT_THAT(Refs, Not(Contains(Pair(findSymbol(Symbols, "Foo").ID, _))));
 }
 
 TEST_F(SymbolCollectorTest, References) {
