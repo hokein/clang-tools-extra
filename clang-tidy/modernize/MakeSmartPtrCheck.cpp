@@ -7,6 +7,8 @@
 //===----------------------------------------------------------------------===//
 
 #include "MakeSharedCheck.h"
+#include "clang/AST/ExprCXX.h"
+#include "clang/ASTMatchers/ASTMatchers.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Lex/Lexer.h"
 #include "clang/Lex/Preprocessor.h"
@@ -290,19 +292,14 @@ bool MakeSmartPtrCheck::replaceNew(DiagnosticBuilder &Diag,
   //   Foo(Bar{1, 2}) => true
   //   Foo(1) => false
   //   Foo{1} => false
-  auto HasListIntializedArgument = [](const CXXConstructExpr *CE) {
-    for (const auto *Arg : CE->arguments()) {
-      Arg = Arg->IgnoreImplicit();
-
-      if (isa<CXXStdInitializerListExpr>(Arg) || isa<InitListExpr>(Arg))
+  auto HasListIntializedArgument = [&Ctx](const CXXConstructExpr *CE) {
+    for (auto *Arg : CE->arguments()) {
+      if (!match(findAll(expr(anyOf(cxxConstructExpr(isListInitialization()),
+                                    initListExpr()))),
+                 *Arg, *Ctx)
+               .empty()) {
         return true;
-      // Check whether we implicitly construct a class from a
-      // std::initializer_list.
-      if (const auto *ImplicitCE = dyn_cast<CXXConstructExpr>(Arg)) {
-        if (ImplicitCE->isStdInitListInitialization())
-          return true;
       }
-      return false;
     }
     return false;
   };
